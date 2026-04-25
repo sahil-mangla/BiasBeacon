@@ -11,6 +11,7 @@ router = APIRouter()
 class SimulateRequest(BaseModel):
     feature: str = "years_at_current_address"
     method: str = "reweight"
+    reference_group: str = "White"
 
 @router.get("/")
 @router.get("/health")
@@ -42,7 +43,22 @@ def get_forecast(weeks_ahead: int = 8):
     cache = get_cache()
     if cache["forecast"] is None:
         raise HTTPException(status_code=503, detail="Data not initialized")
-    return cache["forecast"]
+        
+    if weeks_ahead == 8:
+        return cache["forecast"]
+        
+    hist_di = cache["weekly_metrics"]['di_Black'].tail(12).values
+    from backend.models.ml_logic import forecast_fairness
+    best_fc, cross_w, lower, upper, model_tag = forecast_fairness(hist_di, weeks_ahead=weeks_ahead, threshold=0.85)
+    
+    return {
+        "historical": [float(x) for x in hist_di],
+        "values": [float(x) for x in best_fc],
+        "lower": [float(x) for x in lower],
+        "upper": [float(x) for x in upper],
+        "crossing_week": int(cross_w) if cross_w is not None else None,
+        "model": str(model_tag)
+    }
 
 @router.get("/drift")
 def get_drift_overall():
@@ -68,7 +84,8 @@ def post_simulate(req: SimulateRequest = Body(...)):
     
     res = simulate_reweighting_fix(
         df=cache["df"],
-        reference_group='White',
+        drift_df=cache["drift_df"],
+        reference_group=req.reference_group,
         feature_to_balance=req.feature,
         test_size=0.3,
         seed=42
@@ -84,8 +101,8 @@ def post_simulate(req: SimulateRequest = Body(...)):
     }
 
 @router.get("/generate_script")
-def get_fix_script():
-    script_content = """#!/usr/bin/env python3
+def get_fix_script(feature: str = 'years_at_current_address'):
+    script_content = f"""#!/usr/bin/env python3
 import pandas as pd
 import numpy as np
 from sklearn.linear_model import LogisticRegression
@@ -94,6 +111,7 @@ from sklearn.utils.class_weight import compute_sample_weight
 
 def apply_fairness_fix(input_csv_path, protected_column='group', label_column='approved'):
     df = pd.read_csv(input_csv_path)
+    # Target feature identified for auditing/re-weighting: {feature}
     X = df.drop(columns=[protected_column, label_column]).values
     y = df[label_column].values
     g = df[protected_column].values

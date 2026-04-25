@@ -5,7 +5,14 @@ import uvicorn
 from backend.routes.api import router
 from backend.controllers.fairness_controller import initialize_data
 
-app = FastAPI(title="Fairness Forecaster API")
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    initialize_data()
+    yield
+
+app = FastAPI(title="Fairness Forecaster API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -16,10 +23,6 @@ app.add_middleware(
 )
 
 app.include_router(router)
-
-@app.on_event("startup")
-async def startup_event():
-    initialize_data()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))

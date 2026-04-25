@@ -76,6 +76,7 @@ def generate_synthetic_loan_data(
 
             prob_approve = 1 / (1 + np.exp(-log_odds))
             approved = int(rng.random() < prob_approve)
+            creditworthy = int(credit_score >= 650) # ground truth proxy
 
             all_data.append({
                 'week': week,
@@ -83,6 +84,7 @@ def generate_synthetic_loan_data(
                 'credit_score': credit_score,
                 'years_at_current_address': years_address,
                 'income': income,
+                'creditworthy': creditworthy,
                 'approved': approved,
             })
 
@@ -111,11 +113,11 @@ def compute_fairness_metrics(
         for group in groups:
             gd = week_data[week_data['group'] == group]
             approval_rates[group]  = gd['approved'].mean()
-            # TPR: P(approved | truly_approved) – here 'approved' is our label
-            # so TPR = approval_rate (ground truth = approved in data)
-            approved_mask = gd['approved'] == 1
-            tpr_rates[group]       = approved_mask.mean() if len(gd) > 0 else np.nan
-            precision_rates[group] = approved_mask.mean()  # same in binary sim
+            # TPR: P(approved=1 | creditworthy=1)
+            true_positives = gd[(gd['approved'] == 1) & (gd['creditworthy'] == 1)]
+            actual_positives = gd[gd['creditworthy'] == 1]
+            tpr_rates[group] = len(true_positives) / len(actual_positives) if len(actual_positives) > 0 else np.nan
+            precision_rates[group] = len(true_positives) / len(gd[gd['approved'] == 1]) if len(gd[gd['approved'] == 1]) > 0 else np.nan
 
         ref_rate = approval_rates.get(reference_group, 1.0)
         ref_tpr  = tpr_rates.get(reference_group, 1.0)
@@ -163,7 +165,7 @@ def bootstrap_ci(
 def forecast_fairness(
     historical_di: np.ndarray,
     weeks_ahead: int = 8,
-    threshold: float = 0.5,
+    threshold: float = 0.8,
 ) -> tuple[np.ndarray, int | None, np.ndarray, np.ndarray, str]:
     """
     Fit Linear, Holt-Winters, and ARIMA(1,1,0) models; select by AIC on a
@@ -289,6 +291,7 @@ def detect_feature_drift(
 
 def simulate_reweighting_fix(
     df: pd.DataFrame,
+    drift_df: pd.DataFrame,
     reference_group: str = 'White',
     feature_to_balance: str = 'years_at_current_address',
     test_size: float = 0.3,
@@ -301,7 +304,7 @@ def simulate_reweighting_fix(
     Evaluate DI on a held-out split.
     Returns (baseline_di, corrected_di, financial_savings, improvement, psi_val)
     """
-    features = ['credit_score', 'years_at_current_address', 'income']
+    features = ['credit_score', 'years_at_current_address', 'income', 'creditworthy']
     last_week = df[df['week'] == df['week'].max()].copy()
 
     X = last_week[features].values

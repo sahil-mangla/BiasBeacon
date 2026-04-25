@@ -21,9 +21,7 @@ def initialize_data():
     weekly_metrics = compute_fairness_metrics(df, reference_group='White')
     drift_df = detect_feature_drift(df, current_weeks=4, baseline_weeks=4)
     
-    # Global drift_df for simulate_reweighting_fix
-    import backend.models.ml_logic as ml
-    ml.drift_df = drift_df
+
     
     hist_di = weekly_metrics['di_Black'].tail(12).values
     best_fc, cross_w, lower, upper, model_tag = forecast_fairness(hist_di, weeks_ahead=8, threshold=0.85)
