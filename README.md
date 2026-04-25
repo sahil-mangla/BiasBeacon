@@ -15,7 +15,7 @@ BiasBeacon/
 │   ├── models/           # ML Logic & Fairness metrics (extracted from Notebook)
 │   ├── requirements.txt  # Python dependencies
 │   └── Dockerfile        # Containerization for Cloud Run
-└── frontend/             # React/Vite Frontend (Managed by teammate)
+└── frontend/             # Next.js Frontend
     ├── src/              # Source code
     ├── .env              # Backend configuration
     └── package.json      # Frontend dependencies
@@ -25,32 +25,32 @@ BiasBeacon/
 
 ### Backend Setup
 1. Navigate to the backend directory:
-   \`\`\`bash
+   ```bash
    cd backend
-   \`\`\`
+   ```
 2. Install dependencies:
-   \`\`\`bash
+   ```bash
    pip install -r requirements.txt
-   \`\`\`
+   ```
 3. Run the server:
-   \`\`\`bash
+   ```bash
    export PYTHONPATH=$PYTHONPATH:.
    python main.py
-   \`\`\`
+   ```
 
 ### Frontend Setup
 1. Navigate to the frontend directory:
-   \`\`\`bash
+   ```bash
    cd frontend
-   \`\`\`
+   ```
 2. Install dependencies:
-   \`\`\`bash
+   ```bash
    npm install
-   \`\`\`
+   ```
 3. Run the development server:
-   \`\`\`bash
+   ```bash
    npm run dev
-   \`\`\`
+   ```
 
 ## 🧠 Core Features
 - **Fairness Pulse**: Real-time auditing of Disparate Impact and Equal Opportunity.
