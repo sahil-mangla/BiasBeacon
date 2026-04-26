@@ -1,14 +1,37 @@
-import numpy as np
 import pandas as pd
-from scipy.stats import ks_2samp, pearsonr
-from sklearn.linear_model import LogisticRegression
+import numpy as np
+import warnings
+from datetime import datetime, timedelta
+from typing import Dict, List, Tuple, Optional, Union
+import pickle
+import json
+import copy
+
+# -- ML / Stats imports ---
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_absolute_error, confusion_matrix
 from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_sample_weight
+from scipy import stats
+from scipy.stats import ks_2samp, pearsonr
+import statsmodels.api as sm
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from statsmodels.tsa.arima.model import ARIMA
-from statsmodels.api import OLS, add_constant
 
-# ML logic functions
+# -- For simulation & script generation ---
+from jinja2 import Template
+import os
+
+try:
+    from diffprivlib import mechanisms as dp_mech
+    DP_AVAILABLE = True
+except ImportError:
+    DP_AVAILABLE = False
+    warnings.warn("diffprivlib not installed. Differential privacy not available.")
+
+warnings.filterwarnings('ignore')
+
 def generate_synthetic_loan_data(
     weeks: int = 26,
     samples_per_week: int = 500,
@@ -16,32 +39,25 @@ def generate_synthetic_loan_data(
 ) -> tuple[pd.DataFrame, str]:
     """
     Generate synthetic loan-approval data where bias against minority groups
-    increases linearly over time through *feature drift* that a logistic model
-    picks up – not through directly rigging approval rates.
-
-    Returns
-    -------
-    df : pd.DataFrame
-    reference_group : str
+    increases linearly over time through *feature drift*.
+    Added 'date' column for time-series operations.
     """
-    rng = np.random.default_rng(seed)          # local RNG – no global state
-
+    rng = np.random.default_rng(seed)
     groups = ['White', 'Black', 'Hispanic']
     reference_group = 'White'
-
-    initial_di = 0.85   # week 1  – slightly biased
-    final_di   = 0.55   # week 26 – severely biased
-
+    initial_di = 0.85
+    final_di   = 0.55
     all_data = []
+
+    start_date = datetime.now() - timedelta(weeks=weeks)
 
     for week in range(1, weeks + 1):
         progress = (week - 1) / (weeks - 1)
         current_di = initial_di - (initial_di - final_di) * progress
+        week_date = start_date + timedelta(weeks=week)
 
         for _ in range(samples_per_week):
             group = rng.choice(groups, p=[0.4, 0.3, 0.3])
-
-            # ── Feature distributions that drift for minorities ──────────────
             if group == 'White':
                 credit_score   = rng.normal(720, 50)
                 years_address  = rng.normal(8, 3)
@@ -50,36 +66,33 @@ def generate_synthetic_loan_data(
                 credit_score   = rng.normal(680 - 50 * progress, 55)
                 years_address  = rng.normal(6  -  4 * progress, 2.5)
                 income         = rng.normal(55_000 - 15_000 * progress, 18_000)
-            else:  # Hispanic
+            else:
                 credit_score   = rng.normal(690 - 30 * progress, 52)
                 years_address  = rng.normal(7  -  2 * progress, 2.8)
                 income         = rng.normal(60_000 - 10_000 * progress, 19_000)
 
-            # Clamp to realistic ranges
             credit_score  = float(np.clip(credit_score,  300, 850))
             years_address = float(max(0.0, years_address))
             income        = float(max(20_000, income))
 
-            # ── Approval via logistic score (features now *cause* outcome) ───
-            # Weights calibrated so White approval ≈ 70 % at week 1.
             log_odds = (
                 -6.0
                 + 0.008  * credit_score
                 + 0.06   * years_address
                 + 0.000018 * income
             )
-            # Apply a group-specific intercept shift that widens as bias grows
             if group == 'Black':
-                log_odds += np.log(current_di / 1.0)     # pushes odds down
+                log_odds += np.log(current_di / 1.0)
             elif group == 'Hispanic':
                 log_odds += np.log((current_di + 0.05) / 1.0)
 
             prob_approve = 1 / (1 + np.exp(-log_odds))
             approved = int(rng.random() < prob_approve)
-            creditworthy = int(credit_score >= 650) # ground truth proxy
+            creditworthy = int(credit_score >= 650)
 
             all_data.append({
                 'week': week,
+                'date': week_date,
                 'group': group,
                 'credit_score': credit_score,
                 'years_at_current_address': years_address,
@@ -91,299 +104,32 @@ def generate_synthetic_loan_data(
     df = pd.DataFrame(all_data)
     return df, reference_group
 
-def compute_fairness_metrics(
-    df: pd.DataFrame,
-    reference_group: str = 'White',
-) -> pd.DataFrame:
-    """
-    For every week compute:
-      • Disparate Impact  (DI  = P(approved|minority) / P(approved|reference))
-      • Equal Opportunity (TPR ratio)
-      • Predictive Parity (precision ratio)
-      • Approval rates per group
-    """
-    weekly_metrics = []
-
-    for week in sorted(df['week'].unique()):
-        week_data = df[df['week'] == week]
-        groups    = week_data['group'].unique()
-
-        approval_rates, tpr_rates, precision_rates = {}, {}, {}
-
-        for group in groups:
-            gd = week_data[week_data['group'] == group]
-            approval_rates[group]  = gd['approved'].mean()
-            # TPR: P(approved=1 | creditworthy=1)
-            true_positives = gd[(gd['approved'] == 1) & (gd['creditworthy'] == 1)]
-            actual_positives = gd[gd['creditworthy'] == 1]
-            tpr_rates[group] = len(true_positives) / len(actual_positives) if len(actual_positives) > 0 else np.nan
-            precision_rates[group] = len(true_positives) / len(gd[gd['approved'] == 1]) if len(gd[gd['approved'] == 1]) > 0 else np.nan
-
-        ref_rate = approval_rates.get(reference_group, 1.0)
-        ref_tpr  = tpr_rates.get(reference_group, 1.0)
-
-        row = {'week': week, 'approval_rate_ref': ref_rate}
-        for group in groups:
-            if group == reference_group:
-                continue
-            row[f'di_{group}']            = approval_rates[group] / ref_rate if ref_rate > 0 else np.nan
-            row[f'tpr_ratio_{group}']     = tpr_rates[group] / ref_tpr       if ref_tpr  > 0 else np.nan
-            row[f'approval_rate_{group}'] = approval_rates[group]
-
-        weekly_metrics.append(row)
-
-    return pd.DataFrame(weekly_metrics).sort_values('week').reset_index(drop=True)
-
-def bootstrap_ci(
-    series: np.ndarray,
-    forecast_fn,
-    weeks_ahead: int = 8,
-    n_boot: int = 200,
-    alpha: float = 0.10,
-    seed: int = 0,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return (lower, upper) bootstrap CI arrays of length weeks_ahead."""
-    rng = np.random.default_rng(seed)
-    boot_forecasts = []
-    n = len(series)
-    for _ in range(n_boot):
-        sample_idx = rng.integers(0, n, size=n)
-        try:
-            fc = forecast_fn(series[sample_idx])
-            if fc is not None and len(fc) == weeks_ahead:
-                boot_forecasts.append(fc)
-        except Exception:
-            pass
-    if not boot_forecasts:
-        return series[-1] * np.ones(weeks_ahead), series[-1] * np.ones(weeks_ahead)
-    boot_arr = np.array(boot_forecasts)
-    return (
-        np.percentile(boot_arr, 100 * alpha / 2,     axis=0),
-        np.percentile(boot_arr, 100 * (1 - alpha/2), axis=0),
-    )
-
-def forecast_fairness(
-    historical_di: np.ndarray,
-    weeks_ahead: int = 8,
-    threshold: float = 0.8,
-) -> tuple[np.ndarray, int | None, np.ndarray, np.ndarray, str]:
-    """
-    Fit Linear, Holt-Winters, and ARIMA(1,1,0) models; select by AIC on a
-    comparable scale (all via statsmodels); return forecast + bootstrap CI.
-    """
-    n = len(historical_di)
-    X  = add_constant(np.arange(n))
-    Xf = add_constant(np.arange(n, n + weeks_ahead))
-
-    models: dict[str, tuple[np.ndarray, float]] = {}
-
-    # ── Linear Regression (statsmodels OLS for consistent AIC) ──────────────
-    try:
-        ols    = OLS(historical_di, X).fit()
-        lr_fc  = ols.predict(Xf)
-        models['Linear'] = (lr_fc, ols.aic)
-    except Exception as e:
-        print(f"  Linear model failed: {e}")
-
-    # ── Holt-Winters ─────────────────────────────────────────────────────────
-    try:
-        hw    = ExponentialSmoothing(historical_di, trend='add', seasonal=None).fit()
-        hw_fc = np.asarray(hw.forecast(weeks_ahead))
-        models['Holt-Winters'] = (hw_fc, hw.aic)
-    except (ValueError, Exception) as e:
-        print(f"  Holt-Winters failed: {e}")
-
-    # ── ARIMA(1,1,0) ─────────────────────────────────────────────────────────
-    try:
-        arima    = ARIMA(historical_di, order=(1, 1, 0)).fit()
-        arima_fc = np.asarray(arima.forecast(steps=weeks_ahead))
-        models['ARIMA'] = (arima_fc, arima.aic)
-    except (ValueError, Exception) as e:
-        print(f"  ARIMA failed: {e}")
-
-    if not models:
-        raise RuntimeError("All forecasting models failed.")
-
-    best_name     = min(models, key=lambda k: models[k][1])
-    best_forecast = models[best_name][0]
-    print(f"✅ Best forecasting model: {best_name} "
-          f"(AIC={models[best_name][1]:.1f})")
-
-    # ── Bootstrap CI ─────────────────────────────────────────────────────────
-    def _lr_forecast(s: np.ndarray) -> np.ndarray:
-        Xs  = add_constant(np.arange(len(s)))
-        Xsf = add_constant(np.arange(len(s), len(s) + weeks_ahead))
-        return OLS(s, Xs).fit().predict(Xsf)
-
-    lower, upper = bootstrap_ci(historical_di, _lr_forecast, weeks_ahead)
-
-    # ── Threshold crossing ────────────────────────────────────────────────────
-    crossing_week = next(
-        (i + 1 for i, v in enumerate(best_forecast) if v < threshold),
-        None,
-    )
-
-    return best_forecast, crossing_week, lower, upper, best_name
-
-def psi_aligned(
-    expected: np.ndarray,
-    actual: np.ndarray,
-    bins: int = 10,
-) -> float:
-    """PSI with shared bin edges derived from the combined distribution."""
-    edges = np.histogram_bin_edges(
-        np.concatenate([expected, actual]), bins=bins
-    )
-    exp_counts = np.histogram(expected, bins=edges)[0].astype(float)
-    act_counts = np.histogram(actual,   bins=edges)[0].astype(float)
-    # Replace zeros to avoid log(0)
-    exp_counts = np.where(exp_counts == 0, 1e-8, exp_counts)
-    act_counts = np.where(act_counts == 0, 1e-8, act_counts)
-    # Normalise to proportions
-    exp_pct = exp_counts / exp_counts.sum()
-    act_pct = act_counts / act_counts.sum()
-    return float(np.sum((act_pct - exp_pct) * np.log(act_pct / exp_pct)))
-
-def detect_feature_drift(
-    df: pd.DataFrame,
-    current_weeks: int = 4,
-    baseline_weeks: int = 4,
-) -> pd.DataFrame:
-    """
-    KS test + PSI (with aligned bins) comparing last N weeks vs first N weeks.
-    Now includes per-group breakdown so minority-specific drift is visible.
-    """
-    max_week      = df['week'].max()
-    baseline_data = df[df['week'] <= baseline_weeks]
-    current_data  = df[df['week'] >  max_week - current_weeks]
-
-    features = ['credit_score', 'years_at_current_address', 'income']
-    groups   = sorted(df['group'].unique())
-    rows     = []
-
-    for feature in features:
-        for group in ['ALL'] + groups:
-            if group == 'ALL':
-                base_vals = baseline_data[feature].values
-                curr_vals = current_data[feature].values
-            else:
-                base_vals = baseline_data[baseline_data['group'] == group][feature].values
-                curr_vals = current_data [current_data ['group'] == group][feature].values
-
-            if len(base_vals) == 0 or len(curr_vals) == 0:
-                continue
-
-            ks_stat, ks_p = ks_2samp(base_vals, curr_vals)
-            psi_val       = psi_aligned(base_vals, curr_vals)
-            mean_shift    = (curr_vals.mean() - base_vals.mean()) / (base_vals.std() + 1e-9)
-
-            rows.append({
-                'feature':          feature,
-                'group':            group,
-                'ks_statistic':     round(ks_stat,  4),
-                'ks_pvalue':        round(ks_p,     4),
-                'psi':              round(psi_val,  4),
-                'mean_shift_std':   round(abs(mean_shift), 3),
-                'significant_drift': ks_p < 0.05 or psi_val > 0.1,
-            })
-
-    return pd.DataFrame(rows)
-
-def simulate_reweighting_fix(
-    df: pd.DataFrame,
-    drift_df: pd.DataFrame,
-    reference_group: str = 'White',
-    feature_to_balance: str = 'years_at_current_address',
-    test_size: float = 0.3,
-    seed: int = 42,
-) -> tuple[float, float, float, float, float]:
-    """
-    Train a logistic regression on the last week's data:
-      1. Baseline model (no reweighting)
-      2. Reweighted model (class_weight='balanced' by protected group)
-    Evaluate DI on a held-out split.
-    Returns (baseline_di, corrected_di, financial_savings, improvement, psi_val)
-    """
-    features = ['credit_score', 'years_at_current_address', 'income', 'creditworthy']
-    last_week = df[df['week'] == df['week'].max()].copy()
-
-    X = last_week[features].values
-    y = last_week['approved'].values
-    g = last_week['group'].values
-
-    X_tr, X_te, y_tr, y_te, g_tr, g_te = train_test_split(
-        X, y, g, test_size=test_size, random_state=seed, stratify=g,
-    )
-
-    def compute_di(y_pred, groups, ref=reference_group):
-        rates = {grp: y_pred[groups == grp].mean() for grp in np.unique(groups)}
-        ref_r = rates.get(ref, 1.0)
-        return {grp: (r / ref_r if ref_r > 0 else np.nan)
-                for grp, r in rates.items() if grp != ref}
-
-    # Baseline model
-    lr_base = LogisticRegression(max_iter=500, random_state=seed)
-    lr_base.fit(X_tr, y_tr)
-    pred_base = lr_base.predict(X_te)
-    di_base   = compute_di(pred_base, g_te)
-
-    # Reweighted model – sample weights balance protected groups in training
-    sample_w = compute_sample_weight('balanced', y=g_tr)
-    lr_fair  = LogisticRegression(max_iter=500, random_state=seed)
-    lr_fair.fit(X_tr, y_tr, sample_weight=sample_w)
-    pred_fair = lr_fair.predict(X_te)
-    di_fair   = compute_di(pred_fair, g_te)
-
-    baseline_di_black  = di_base.get('Black', 0.0)
-    corrected_di_black = di_fair.get('Black', 0.0)
-    improvement        = corrected_di_black - baseline_di_black
-
-    # PSI of the balanced feature (for informational output)
-    psi_val = drift_df.query("feature == @feature_to_balance and group == 'ALL'")['psi'].values
-    psi_val = float(psi_val[0]) if len(psi_val) > 0 else 0.0
-
-    # Financial impact – derive denied-minority fraction from data
-    minority_denied_rate = (
-        last_week[(last_week['group'] == 'Black') & (last_week['approved'] == 0)]
-        .shape[0] / len(last_week)
-    )
-    annual_applications = 10_000
-    profit_per_loan     = 500
-    extra_approved      = annual_applications * minority_denied_rate * max(improvement, 0)
-    financial_savings   = extra_approved * profit_per_loan
-
-    return baseline_di_black, corrected_di_black, financial_savings, improvement, psi_val
-
 def calculate_financial_impact(
     weekly_metrics: pd.DataFrame,
     df: pd.DataFrame,
     annual_applications: int = 10_000,
     profit_per_loan: int = 500,
 ) -> tuple[list, list, list, list]:
-    """
-    Estimate weekly savings if the model had been kept at DI ≥ 0.85 from the start.
-
-    The 'conversion factor' (what fraction of excess-denied applicants would
-    have been profitable if approved) is derived from the data: it equals the
-    overall approval rate among the minority group in the baseline weeks –
-    i.e. how many of those denials were creditworthy.
-    """
-    # Derive conversion factor from baseline data (weeks 1-4)
-    baseline = df[df['week'] <= 4]
+    # Robustly select baseline rows: use integer 'week' column when available,
+    # otherwise fall back to the first 2 000 rows (≈ 4 weeks × 500/week).
+    if 'week' in df.columns and pd.api.types.is_integer_dtype(df['week']):
+        baseline = df[df['week'] <= 4]
+    else:
+        baseline = df.head(2000)
     minority  = baseline[baseline['group'] != 'White']
-    conversion_factor = minority['approved'].mean()   # ≈ fraction that are creditworthy
-    print(f"   Conversion factor (data-derived): {conversion_factor:.2f}")
-
+    conversion_factor = minority['approved'].mean() if len(minority) > 0 else 0.5
     fair_target   = 0.85
     weekly_apps   = annual_applications / 52
-    minority_share = 0.30   # 30 % of applicants are minority (matches data generation)
+    minority_share = 0.30
 
     weekly_savings_base, cum_base   = [], []
     weekly_savings_opt,  cum_opt    = [], []
     weekly_savings_pess, cum_pess   = [], []
 
+    di_col = 'di_Black' if 'di_Black' in weekly_metrics.columns else 'disparate_impact'
+
     for i, row in weekly_metrics.iterrows():
-        di = row['di_Black']
+        di = row.get(di_col, 1.0)
         gap = max(0.0, fair_target - di)
 
         extra_denied    = weekly_apps * minority_share * gap
@@ -401,8 +147,541 @@ def calculate_financial_impact(
 
     return weekly_savings_base, cum_base, cum_opt, cum_pess
 
-    def _lr_forecast(s: np.ndarray) -> np.ndarray:
-        Xs  = add_constant(np.arange(len(s)))
-        Xsf = add_constant(np.arange(len(s), len(s) + weeks_ahead))
-        return OLS(s, Xs).fit().predict(Xsf)
 
+class FairnessMetrics:
+    def __init__(self, data: pd.DataFrame, target_col: str, protected_col: str,
+                 privileged_group: str, unprivileged_group: str = None, date_col: str = None):
+        self.data = data
+        self.target_col = target_col
+        self.protected_col = protected_col
+        self.privileged = privileged_group
+        all_vals = data[protected_col].unique()
+        self.unprivileged = unprivileged_group if unprivileged_group else ([v for v in all_vals if v != privileged_group][0] if len(all_vals)>1 else None)
+        self.date_col = date_col
+        self.results = []
+
+    def compute_metrics_for_group(self, group_mask: pd.Series, y_true: pd.Series, y_pred: pd.Series = None) -> dict:
+        if y_pred is None:
+            y_pred = y_true
+        tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0,1]).ravel()
+        tpr = tp / (tp + fn) if (tp+fn) > 0 else 0
+        fpr = fp / (fp + tn) if (fp+tn) > 0 else 0
+        ppv = tp / (tp + fp) if (tp+fp) > 0 else 0
+        return {'tpr': tpr, 'fpr': fpr, 'ppv': ppv, 'count': len(y_true)}
+
+    def disparate_impact(self, prob_priv: float, prob_unpriv: float) -> float:
+        return prob_unpriv / prob_priv if prob_priv > 0 else np.inf
+
+    def equalized_odds_diff(self, tpr_priv, tpr_unpriv, fpr_priv, fpr_unpriv) -> float:
+        return max(abs(fpr_unpriv - fpr_priv), abs(tpr_unpriv - tpr_priv))
+
+    def demographic_parity_diff(self, prob_priv: float, prob_unpriv: float) -> float:
+        return prob_unpriv - prob_priv
+
+    def predictive_parity(self, ppv_priv: float, ppv_unpriv: float) -> float:
+        return ppv_unpriv - ppv_priv
+
+    def conditional_demographic_disparity(self) -> float:
+        return 0.0
+
+    def theil_index(self, outcomes: pd.Series) -> float:
+        if outcomes.dtype == 'object':
+            outcomes = outcomes.astype(float)
+        n = len(outcomes)
+        if n == 0 or outcomes.sum() == 0:
+            return 0.0
+        mean = outcomes.mean()
+        if mean == 0:
+            return 0.0
+        relative = outcomes / mean
+        theil = (1/n) * np.sum(relative * np.log(relative))
+        return theil
+
+    def compute_all_metrics(self, week_data: pd.DataFrame) -> dict:
+        y_true = week_data['creditworthy'] if 'creditworthy' in week_data.columns else week_data[self.target_col]
+        y_pred = week_data[self.target_col]
+
+        priv_mask = week_data[self.protected_col] == self.privileged
+        unpriv_mask = week_data[self.protected_col] == self.unprivileged
+
+        priv_stats = self.compute_metrics_for_group(priv_mask, y_true[priv_mask], y_pred[priv_mask])
+        unpriv_stats = self.compute_metrics_for_group(unpriv_mask, y_true[unpriv_mask], y_pred[unpriv_mask])
+
+        prob_priv = y_pred[priv_mask].mean() if priv_mask.any() else 0
+        prob_unpriv = y_pred[unpriv_mask].mean() if unpriv_mask.any() else 0
+
+        di = self.disparate_impact(prob_priv, prob_unpriv)
+        eod = self.equalized_odds_diff(priv_stats['tpr'], unpriv_stats['tpr'],
+                                        priv_stats['fpr'], unpriv_stats['fpr'])
+        dp_diff = self.demographic_parity_diff(prob_priv, prob_unpriv)
+        pred_par = self.predictive_parity(priv_stats['ppv'], unpriv_stats['ppv'])
+        cdd = self.conditional_demographic_disparity()
+        theil = self.theil_index(week_data[self.target_col])
+
+        return {
+            'disparate_impact': di,
+            'equalized_odds_diff': eod,
+            'demographic_parity_diff': dp_diff,
+            'predictive_parity': pred_par,
+            'conditional_demographic_disparity': cdd,
+            'theil_index': theil,
+            'prob_priv': prob_priv,
+            'prob_unpriv': prob_unpriv,
+            'count_priv': priv_mask.sum(),
+            'count_unpriv': unpriv_mask.sum()
+        }
+
+    def compute_weekly(self) -> pd.DataFrame:
+        if self.date_col is None:
+            if 'week' in self.data.columns:
+                weeks = self.data.groupby('week')
+                for week_val, week_data in weeks:
+                    if len(week_data) > 0:
+                        metrics = self.compute_all_metrics(week_data)
+                        metrics['week'] = week_val
+                        metrics['week_start'] = week_val
+                        self.results.append(metrics)
+            else:
+                week_metrics = self.compute_all_metrics(self.data)
+                week_metrics['week_start'] = datetime.now().date()
+                self.results.append(week_metrics)
+        else:
+            # ── IMPORTANT: never mutate the original dataframe ──────────────
+            data_copy = self.data.copy()
+            data_copy[self.date_col] = pd.to_datetime(data_copy[self.date_col])
+            df = data_copy.set_index(self.date_col).sort_index()
+            weeks = df.resample('W')
+            week_counter = 1
+            for week_start, week_data in weeks:
+                if len(week_data) > 0:
+                    metrics = self.compute_all_metrics(week_data)
+                    metrics['week_start'] = week_start.date()
+                    metrics['week'] = week_counter
+                    self.results.append(metrics)
+                    week_counter += 1
+
+        results_df = pd.DataFrame(self.results)
+        if self.unprivileged == 'Black':
+            results_df['di_Black'] = results_df['disparate_impact']
+        return results_df
+
+
+class ForecastingEngine:
+    def __init__(self, metrics_df: pd.DataFrame, metric_name: str, threshold: float,
+                 crossing_direction: str = 'below'):
+        self.df = metrics_df.sort_values('week_start').copy()
+        self.metric = metric_name
+        self.threshold = threshold
+        self.direction = crossing_direction
+        self.model = None
+        self.model_name = None
+
+    def _detect_seasonality(self, series: pd.Series) -> bool:
+        if len(series) < 5:
+            return False
+        autocorr = series.autocorr(lag=4)
+        return False if pd.isna(autocorr) else abs(autocorr) > 0.3
+
+    def _fit_best_model(self, series: pd.Series):
+        X = np.arange(len(series)).reshape(-1,1)
+        y = series.values
+        lr = LinearRegression()
+        lr.fit(X, y)
+        lr_pred = lr.predict(X)
+        lr_mae = mean_absolute_error(y, lr_pred)
+
+        best_mae = lr_mae
+        best_model = lr
+        best_name = "LinearRegression"
+
+        if self._detect_seasonality(series) and len(series) >= 10:
+            try:
+                hw = ExponentialSmoothing(series, seasonal_periods=4, trend='add', seasonal='add').fit()
+                hw_pred = hw.fittedvalues
+                hw_mae = mean_absolute_error(y[4:], hw_pred[4:]) if len(y)>4 else np.inf
+                if hw_mae < best_mae:
+                    best_mae = hw_mae
+                    best_model = hw
+                    best_name = "HoltWinters"
+            except:
+                pass
+
+        try:
+            arima = ARIMA(series, order=(1,1,0), trend='c').fit()
+            arima_pred = arima.fittedvalues
+            arima_mae = mean_absolute_error(y[2:], arima_pred[2:]) if len(y)>2 else np.inf
+            if arima_mae < best_mae:
+                best_mae = arima_mae
+                best_model = arima
+                best_name = "ARIMA(1,1,0)"
+        except:
+            pass
+
+        self.model = best_model
+        self.model_name = best_name
+
+    def predict_crossing_date(self, future_weeks: int = 52):
+        series = self.df.set_index('week_start')[self.metric]
+        self._fit_best_model(series)
+
+        last_date = series.index[-1]
+        forecast_values = []
+        residuals = []
+
+        if self.model_name == "LinearRegression":
+            X_future = np.arange(len(series), len(series)+future_weeks).reshape(-1,1)
+            preds = self.model.predict(X_future)
+            X_train = np.arange(len(series)).reshape(-1,1)
+            train_pred = self.model.predict(X_train)
+            residuals = series.values - train_pred
+            forecast_values = preds
+        elif self.model_name == "HoltWinters":
+            preds = self.model.forecast(future_weeks)
+            fitted = self.model.fittedvalues
+            residuals = series.iloc[-len(fitted):].values - fitted.values
+            forecast_values = preds
+        elif self.model_name == "ARIMA(1,1,0)":
+            preds = self.model.forecast(steps=future_weeks)
+            residuals = self.model.resid[~np.isnan(self.model.resid)]
+            forecast_values = preds
+        else:
+            return None, None, None, None, None
+
+        cross_week = None
+        for i, val in enumerate(forecast_values):
+            if self.direction == 'below' and val < self.threshold:
+                cross_week = i
+                break
+            elif self.direction == 'above' and val > self.threshold:
+                cross_week = i
+                break
+
+        if cross_week is None:
+            cross_week_val = None
+        else:
+            cross_week_val = len(series) + cross_week + 1
+
+        if len(residuals) > 1:
+            bootstrap_residuals = np.random.choice(residuals, size=1000, replace=True)
+            lower_bound = np.percentile(bootstrap_residuals, 5)
+            upper_bound = np.percentile(bootstrap_residuals, 95)
+            lower = forecast_values + lower_bound
+            upper = forecast_values + upper_bound
+        else:
+            lower = forecast_values - 0.05
+            upper = forecast_values + 0.05
+
+        return forecast_values, cross_week_val, lower, upper, self.model_name
+
+
+class RootCauseAnalyzer:
+    def __init__(self, data: pd.DataFrame, target_col: str, protected_col: str,
+                 fairness_series: pd.Series, feature_columns: List[str] = None):
+        self.data = data
+        self.target = target_col
+        self.protected = protected_col
+        self.fairness_series = fairness_series
+        if feature_columns is None:
+            self.features = [c for c in data.columns if c not in [target_col, protected_col, 'week', 'date', 'creditworthy', 'approved']]
+        else:
+            self.features = feature_columns
+        self.date_col = None
+        self.baseline = None
+        self.privileged_group = None
+
+    def set_time_column(self, date_col: str, privileged_group: str = None, baseline_weeks=4):
+        self.date_col = date_col
+        self.privileged_group = privileged_group
+        
+        if self.data[date_col].dtype.name == 'datetime64[ns]' or type(self.data[date_col].iloc[0]) != int:
+            self.data[date_col] = pd.to_datetime(self.data[date_col])
+            min_date = self.data[date_col].min()
+            baseline_end = min_date + timedelta(weeks=baseline_weeks)
+            self.baseline = self.data[self.data[date_col] <= baseline_end]
+        else:
+            self.baseline = self.data[self.data[date_col] <= baseline_weeks]
+
+    def drift_ks_numeric(self, current: pd.Series, baseline: pd.Series) -> Tuple[float, bool]:
+        stat, p = ks_2samp(baseline.dropna(), current.dropna())
+        return stat, p < 0.05
+
+    def drift_psi_categorical(self, current: pd.Series, baseline: pd.Series, bins: int = 10) -> float:
+        if current.dtype in ['object', 'category']:
+            cats = set(current.unique()).union(set(baseline.unique()))
+            psi = 0
+            for cat in cats:
+                p_base = (baseline == cat).mean()
+                p_cur = (current == cat).mean()
+                if p_base > 0 and p_cur > 0:
+                    psi += (p_cur - p_base) * np.log(p_cur / p_base)
+            return psi
+        else:
+            combined = pd.concat([baseline, current])
+            try:
+                q_cuts = pd.qcut(combined, q=bins, duplicates='drop')
+                bins_edges = q_cuts.cat.categories
+            except:
+                bins_edges = np.linspace(combined.min(), combined.max(), bins+1)
+            baseline_binned = pd.cut(baseline, bins_edges, include_lowest=True)
+            current_binned = pd.cut(current, bins_edges, include_lowest=True)
+            psi = 0
+            for interval in baseline_binned.cat.categories:
+                p_base = (baseline_binned == interval).mean()
+                p_cur = (current_binned == interval).mean()
+                if p_base > 0 and p_cur > 0:
+                    psi += (p_cur - p_base) * np.log(p_cur / p_base)
+            return psi
+
+    def compute_drift_over_weeks(self) -> pd.DataFrame:
+        if self.date_col is None:
+            raise ValueError("Set time column first with set_time_column()")
+
+        if self.data[self.date_col].dtype.name == 'datetime64[ns]':
+            weeks = self.data.groupby(pd.Grouper(key=self.date_col, freq='W'))
+        else:
+            weeks = self.data.groupby(self.date_col)
+
+        drift_records = []
+        for week_start, week_data in weeks:
+            for group in ['ALL'] + list(self.data[self.protected].unique()):
+                if group == 'ALL':
+                    cur_group_data = week_data
+                    base_group_data = self.baseline
+                else:
+                    cur_group_data = week_data[week_data[self.protected] == group]
+                    base_group_data = self.baseline[self.baseline[self.protected] == group]
+
+                for feat in self.features:
+                    cur_vals = cur_group_data[feat]
+                    base_vals = base_group_data[feat]
+                    
+                    if cur_vals.empty or base_vals.empty:
+                        continue
+                    if pd.api.types.is_numeric_dtype(cur_vals):
+                        stat, drifted = self.drift_ks_numeric(cur_vals, base_vals)
+                        psi = self.drift_psi_categorical(cur_vals, base_vals)
+                        drift_records.append({
+                            'week': week_start.date() if hasattr(week_start, 'date') else week_start,
+                            'group': group,
+                            'feature': feat,
+                            'drift_stat': stat,
+                            'drifted': drifted,
+                            'drift_type': 'KS',
+                            'psi': psi,
+                            'significant_drift': drifted or psi > 0.1
+                        })
+                    else:
+                        psi = self.drift_psi_categorical(cur_vals, base_vals)
+                        drifted = psi > 0.1
+                        drift_records.append({
+                            'week': week_start.date() if hasattr(week_start, 'date') else week_start,
+                            'group': group,
+                            'feature': feat,
+                            'drift_stat': psi,
+                            'drifted': drifted,
+                            'drift_type': 'PSI',
+                            'psi': psi,
+                            'significant_drift': drifted
+                        })
+        return pd.DataFrame(drift_records)
+
+    def run_analysis(self) -> dict:
+        drift_df = self.compute_drift_over_weeks()
+        return {
+            'drift_df': drift_df
+        }
+
+class SimulationEngine:
+    def __init__(self, data: pd.DataFrame, target_col: str, protected_col: str,
+                 privileged_group: str, feature_to_correct: str):
+        self.data = data
+        self.target = target_col
+        self.protected = protected_col
+        self.privileged = privileged_group
+        self.correction_feature = feature_to_correct
+        self.corrected_data = None
+
+    def reweight_by_feature_imbalance(self) -> pd.DataFrame:
+        data_copy = self.data.copy()
+        if pd.api.types.is_numeric_dtype(data_copy[self.correction_feature]):
+            data_copy['_temp_bin'] = pd.qcut(data_copy[self.correction_feature], q=5, labels=False, duplicates='drop')
+            groups = data_copy.groupby('_temp_bin')
+        else:
+            groups = data_copy.groupby(self.correction_feature)
+
+        total_samples = len(data_copy)
+        weights = np.zeros(total_samples)
+        for name, idx in groups.groups.items():
+            group_size = len(idx)
+            weight = total_samples / (group_size * len(groups))
+            weights[idx] = weight
+        data_copy['_weight'] = weights
+        sampled_indices = np.random.choice(data_copy.index, size=total_samples, replace=True, p=weights/weights.sum())
+        self.corrected_data = data_copy.loc[sampled_indices].drop(columns=['_weight', '_temp_bin'], errors='ignore')
+        return self.corrected_data
+
+    def simulate_forecast(self, unprivileged_group):
+        # Group by the integer 'week' column (date_col=None) to avoid
+        # converting the week column to datetime64, which would corrupt cache["df"].
+        fm_sim = FairnessMetrics(self.corrected_data, self.target, self.protected,
+                                 self.privileged, unprivileged_group, date_col=None)
+        metrics_sim = fm_sim.compute_weekly()
+        di_sim = metrics_sim['disparate_impact'].mean() if not metrics_sim.empty else 1.0
+
+        fm_orig = FairnessMetrics(self.data, self.target, self.protected,
+                                  self.privileged, unprivileged_group, date_col=None)
+        metrics_orig = fm_orig.compute_weekly()
+        di_orig = metrics_orig['disparate_impact'].mean() if not metrics_orig.empty else 0.5
+
+        improvement = (di_sim - di_orig) / di_orig if di_orig > 0 else 0
+        return {
+            'original_di': di_orig,
+            'simulated_di': di_sim,
+            'improvement': improvement,
+            'weekly_sim': metrics_sim,
+            'weekly_orig': metrics_orig,
+        }
+
+    def generate_mitigation_script(self) -> str:
+        template_str = """#!/usr/bin/env python3
+# Auto-generated fairness mitigation script
+# Fix applied: re-weighting based on feature '{{ correction_feature }}'
+
+import pandas as pd
+import numpy as np
+from sklearn.linear_model import LogisticRegression
+
+def apply_reweighting(data, correction_feature, target_col, protected_col, privileged_group):
+    data = data.copy()
+    if pd.api.types.is_numeric_dtype(data[correction_feature]):
+        data['_temp_bin'] = pd.qcut(data[correction_feature], q=5, labels=False, duplicates='drop')
+        groups = data.groupby('_temp_bin')
+    else:
+        groups = data.groupby(correction_feature)
+    total = len(data)
+    weights = np.zeros(total)
+    for name, idx in groups.groups.items():
+        group_size = len(idx)
+        weight = total / (group_size * len(groups))
+        weights[idx] = weight
+    sampled_idx = np.random.choice(data.index, size=total, replace=True, p=weights/weights.sum())
+    corrected = data.loc[sampled_idx].drop('_temp_bin', axis=1, errors='ignore')
+    return corrected
+
+if __name__ == "__main__":
+    df = pd.read_csv("your_training_data.csv")
+    fixed_df = apply_reweighting(df, "{{ correction_feature }}", "{{ target }}", "{{ protected }}", "{{ privileged }}")
+    fixed_df.to_csv("fair_training_set.csv", index=False)
+    print("Fair training set saved.")
+"""
+        template = Template(template_str)
+        script_content = template.render(
+            correction_feature=self.correction_feature,
+            target=self.target,
+            protected=self.protected,
+            privileged=self.privileged
+        )
+        return script_content
+
+
+class UnbiasingLayer:
+    def __init__(self, data: pd.DataFrame, target_col: str, protected_col: str,
+                 privileged_group: str, prediction_score_col: str = None):
+        self.original_data = data.copy()
+        self.target = target_col
+        self.protected = protected_col
+        self.privileged = privileged_group
+        self.unprivileged = [v for v in data[protected_col].unique() if v != privileged_group][0]
+        self.score_col = prediction_score_col
+        if self.score_col is None or self.score_col not in data.columns:
+            self.score_col = target_col
+        self.cleaned_data = None
+        self.applied_method = None
+
+    def reweighting(self) -> pd.DataFrame:
+        df = self.original_data.copy()
+        group_counts = df[self.protected].value_counts()
+        total = len(df)
+        weights = np.ones(total)
+        for group, count in group_counts.items():
+            desired = total / len(group_counts)
+            weight = desired / count
+            weights[df[self.protected] == group] = weight
+        df['_weight'] = weights
+        self.cleaned_data = df
+        self.applied_method = "reweighting"
+        return df
+
+    def reject_option_classification(self, margin: float = 0.2, gamma: float = 0.5) -> pd.DataFrame:
+        df = self.original_data.copy()
+        scores = df[self.score_col].values
+        original_decision = (scores > 0.5).astype(int)
+        borderline = (scores >= 0.5 - margin) & (scores <= 0.5 + margin)
+        is_unpriv = (df[self.protected] == self.unprivileged).values
+        new_decision = original_decision.copy()
+        flip_mask = borderline & is_unpriv
+        new_decision[flip_mask] = 1 - new_decision[flip_mask]
+        df['_adjusted_prediction'] = new_decision
+        df['_adjusted_target'] = new_decision
+        self.cleaned_data = df
+        self.applied_method = "reject_option"
+        return df
+
+    def threshold_adjustment(self, target_parity: str = 'equalized_odds') -> pd.DataFrame:
+        df = self.original_data.copy()
+        scores = df[self.score_col].values
+        y_true = df[self.target].values
+
+        priv_mask = (df[self.protected] == self.privileged).values
+        unpriv_mask = (df[self.protected] == self.unprivileged).values
+
+        def find_threshold(scores_group, y_group, target_tpr):
+            thresholds = np.linspace(0, 1, 101)
+            best_thresh = 0.5
+            best_diff = np.inf
+            for thresh in thresholds:
+                pred = (scores_group >= thresh).astype(int)
+                tp = np.sum((pred == 1) & (y_group == 1))
+                fn = np.sum((pred == 0) & (y_group == 1))
+                tpr = tp / (tp+fn) if (tp+fn)>0 else 0
+                diff = abs(tpr - target_tpr)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_thresh = thresh
+            return best_thresh
+
+        overall_tpr = np.sum((scores > 0.5) & (y_true==1)) / max(1, np.sum(y_true==1))
+        if target_parity == 'equalized_odds':
+            priv_thresh = find_threshold(scores[priv_mask], y_true[priv_mask], overall_tpr)
+            unpriv_thresh = find_threshold(scores[unpriv_mask], y_true[unpriv_mask], overall_tpr)
+        else:
+            desired_rate = np.mean((scores > 0.5))
+            priv_thresh = find_threshold(scores[priv_mask], y_true[priv_mask], desired_rate)
+            unpriv_thresh = find_threshold(scores[unpriv_mask], y_true[unpriv_mask], desired_rate)
+
+        new_pred = np.zeros_like(scores, dtype=int)
+        new_pred[priv_mask] = (scores[priv_mask] >= priv_thresh).astype(int)
+        new_pred[unpriv_mask] = (scores[unpriv_mask] >= unpriv_thresh).astype(int)
+        df['_adjusted_prediction'] = new_pred
+        df['_adjusted_target'] = new_pred
+        self.cleaned_data = df
+        self.applied_method = "threshold_adjustment"
+        return df
+
+    def apply_differential_privacy_to_metrics(self, metrics_df: pd.DataFrame, epsilon: float = 1.0) -> pd.DataFrame:
+        if not DP_AVAILABLE:
+            return metrics_df
+        dp_metrics = metrics_df.copy()
+        numeric_cols = ['disparate_impact', 'equalized_odds_diff', 'demographic_parity_diff',
+                        'predictive_parity', 'theil_index']
+        for col in numeric_cols:
+            if col in dp_metrics.columns:
+                mech = dp_mech.Laplace(epsilon=epsilon, sensitivity=1.0)
+                noisy_values = [mech.randomise(v) for v in dp_metrics[col].values]
+                dp_metrics[col] = noisy_values
+        return dp_metrics
+
+    def get_cleaned_dataset(self) -> pd.DataFrame:
+        if self.cleaned_data is None:
+            raise ValueError("Run one of the mitigation methods first.")
+        return self.cleaned_data
