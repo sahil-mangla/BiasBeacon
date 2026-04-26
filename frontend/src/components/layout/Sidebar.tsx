@@ -2,12 +2,30 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import AnalysisModal from '@/components/ui/AnalysisModal';
 
 export default function Sidebar() {
   const pathname = usePathname();
   const [isAnalysisModalOpen, setIsAnalysisModalOpen] = useState(false);
+  const [safetyScore, setSafetyScore] = useState(88);
+
+  const fetchSafetyScore = async () => {
+    try {
+      const res = await fetch('/metrics/latest');
+      if (res.ok) {
+        const data = await res.json();
+        const di = data.disparate_impact || 0.88;
+        setSafetyScore(Math.round(di * 100));
+      }
+    } catch (err) {
+      console.error("Failed to fetch safety score", err);
+    }
+  };
+
+  useEffect(() => {
+    fetchSafetyScore();
+  }, []);
 
   const navItems = [
     { name: "Health Overview", href: "/", icon: "query_stats" },
@@ -48,11 +66,47 @@ export default function Sidebar() {
           })}
         </nav>
 
+        <div className="px-6 pb-4">
+          <div className="p-6 rounded-3xl bg-sage/5 border border-sage/10 space-y-4">
+            <h4 className="text-[10px] font-bold text-sage uppercase tracking-widest text-center">Data Management</h4>
+            <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-sage/20 border-dashed rounded-2xl cursor-pointer hover:bg-sage/10 transition-all group">
+              <div className="flex flex-col items-center justify-center pt-5 pb-6">
+                <span className="material-symbols-outlined text-sage text-2xl mb-2 group-hover:scale-110 transition-transform">upload_file</span>
+                <p className="text-[10px] font-bold text-sage/60 uppercase tracking-widest">Upload CSV</p>
+              </div>
+              <input 
+                type="file" 
+                className="hidden" 
+                accept=".csv" 
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  
+                  const formData = new FormData();
+                  formData.append('file', file);
+                  
+                  try {
+                    const res = await fetch('/api/upload-data', {
+                      method: 'POST',
+                      body: formData
+                    });
+                    if (res.ok) {
+                      window.location.reload();
+                    }
+                  } catch (err) {
+                    console.error("Upload failed", err);
+                  }
+                }}
+              />
+            </label>
+          </div>
+        </div>
+
         <div className="p-8 border-t border-charcoal/5">
           <div className="p-4 rounded-2xl bg-sage/5 border border-sage/10 space-y-3">
-            <p className="text-[10px] font-bold text-sage uppercase tracking-widest text-center">Safety Score: 88%</p>
+            <p className="text-[10px] font-bold text-sage uppercase tracking-widest text-center">Safety Score: {safetyScore}%</p>
             <div className="h-1.5 w-full bg-sage/10 rounded-full overflow-hidden">
-              <div className="h-full bg-sage w-[88%]" />
+              <div className="h-full bg-sage transition-all duration-1000" style={{ width: `${safetyScore}%` }} />
             </div>
           </div>
         </div>
