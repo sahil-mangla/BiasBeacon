@@ -109,15 +109,25 @@ def calculate_financial_impact(
     df: pd.DataFrame,
     annual_applications: int = 10_000,
     profit_per_loan: int = 500,
+    protected_col: str = 'group',
+    privileged_group: str = 'White',
+    target_col: str = 'approved',
 ) -> tuple[list, list, list, list]:
-    # Robustly select baseline rows: use integer 'week' column when available,
-    # otherwise fall back to the first 2 000 rows (≈ 4 weeks × 500/week).
-    if 'week' in df.columns and pd.api.types.is_integer_dtype(df['week']):
-        baseline = df[df['week'] <= 4]
-    else:
-        baseline = df.head(2000)
-    minority  = baseline[baseline['group'] != 'White']
-    conversion_factor = minority['approved'].mean() if len(minority) > 0 else 0.5
+    """Counterfactual loss estimator. Accepts dynamic column names for any CSV."""
+    n_weeks = len(weekly_metrics) if weekly_metrics is not None and len(weekly_metrics) > 0 else 12
+    if df is None or protected_col not in df.columns or target_col not in df.columns:
+        zeros = [0.0] * n_weeks
+        return zeros, zeros, zeros, zeros
+    try:
+        if 'week' in df.columns and pd.api.types.is_integer_dtype(df['week']):
+            baseline = df[df['week'] <= 4]
+        else:
+            baseline = df.head(max(1, len(df) // 5))
+        minority = baseline[baseline[protected_col] != privileged_group]
+        target_vals = pd.to_numeric(minority[target_col], errors='coerce').dropna()
+        conversion_factor = float(target_vals.mean()) if len(target_vals) > 0 else 0.5
+    except Exception:
+        conversion_factor = 0.5
     fair_target   = 0.85
     weekly_apps   = annual_applications / 52
     minority_share = 0.30
@@ -170,7 +180,9 @@ class FairnessMetrics:
         return {'tpr': tpr, 'fpr': fpr, 'ppv': ppv, 'count': len(y_true)}
 
     def disparate_impact(self, prob_priv: float, prob_unpriv: float) -> float:
-        return prob_unpriv / prob_priv if prob_priv > 0 else np.inf
+        if prob_priv <= 0:
+            return 0.0  # no privileged approvals → worst-case DI, not infinity
+        return min(prob_unpriv / prob_priv, 4.0)  # cap at 4.0 to prevent overflow
 
     def equalized_odds_diff(self, tpr_priv, tpr_unpriv, fpr_priv, fpr_unpriv) -> float:
         return max(abs(fpr_unpriv - fpr_priv), abs(tpr_unpriv - tpr_priv))
@@ -253,12 +265,22 @@ class FairnessMetrics:
             weeks = df.resample('W')
             week_counter = 1
             for week_start, week_data in weeks:
-                if len(week_data) > 0:
-                    metrics = self.compute_all_metrics(week_data)
-                    metrics['week_start'] = week_start.date()
-                    metrics['week'] = week_counter
-                    self.results.append(metrics)
-                    week_counter += 1
+                if len(week_data) < 5:
+                    continue  # skip weeks too thin to compute reliable metrics
+
+                priv_count = (week_data[self.protected_col].astype(str) == str(self.privileged)).sum()
+                unpriv_count = len(week_data) - priv_count
+
+                if priv_count < 2 or unpriv_count < 2:
+                    continue  # skip weeks where a group has 0 members → DI would be inf or 0/0
+
+                metrics = self.compute_all_metrics(week_data)
+                if metrics is None:
+                    continue
+                metrics['week_start'] = week_start.date()
+                metrics['week'] = week_counter
+                self.results.append(metrics)
+                week_counter += 1
 
         results_df = pd.DataFrame(self.results)
         if self.unprivileged == 'Black':

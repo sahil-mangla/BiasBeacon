@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { fetchFromApi } from "@/lib/api";
+import { useBiasBeacon } from "@/context/BiasBeaconContext";
 import FairnessGauge from "@/components/ui/FairnessGauge";
 import FairnessScoreCard from "@/components/ui/FairnessScoreCard";
 import AnimatedNumber from "@/components/ui/AnimatedNumber";
@@ -10,13 +11,19 @@ import { motion } from 'framer-motion';
 
 export default function Home() {
   const [isSavingsModalOpen, setIsSavingsModalOpen] = useState(false);
-  const [metrics, setMetrics] = useState<any>(null);
-  const [historicalMetrics, setHistoricalMetrics] = useState<any[]>([]);
-  const [forecast, setForecast] = useState<any>(null);
-  const [savings, setSavings] = useState<any>(null);
+  const { state } = useBiasBeacon();
+
+  // Legacy API state (used when no context session)
+  const [legacyMetrics, setLegacyMetrics] = useState<any>(null);
+  const [legacyHistorical, setLegacyHistorical] = useState<any[]>([]);
+  const [legacyForecast, setLegacyForecast] = useState<any>(null);
+  const [legacySavings, setLegacySavings] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
+  const hasRealData = !!(state.metrics);
+
   useEffect(() => {
+    if (hasRealData) { setLoading(false); return; }
     async function loadData() {
       try {
         const [latestMetrics, histMetrics, forecastData, savingsData] = await Promise.all([
@@ -25,10 +32,10 @@ export default function Home() {
           fetchFromApi('/forecast/predict'),
           fetchFromApi('/savings')
         ]);
-        setMetrics(latestMetrics);
-        setHistoricalMetrics(histMetrics);
-        setForecast(forecastData);
-        setSavings(savingsData);
+        setLegacyMetrics(latestMetrics);
+        setLegacyHistorical(histMetrics);
+        setLegacyForecast(forecastData);
+        setLegacySavings(savingsData);
       } catch (err) {
         console.error("Failed to load dashboard data", err);
       } finally {
@@ -36,26 +43,46 @@ export default function Home() {
       }
     }
     loadData();
-  }, []);
+  }, [hasRealData]);
 
-  // DI and EO calculation
-  const diValue = metrics ? (metrics.di_Black ?? metrics.disparate_impact ?? 0.42) : 0.42;
-  const eoValue = metrics ? (metrics.tpr_ratio_Black ?? (1 - (metrics.equalized_odds_diff || 0)) ?? 0.45) : 0.45; // Equal Opportunity as proxy for EO
-  
-  // Last 12 weeks of DI for sparkline
-  const diHistory = historicalMetrics.slice(-12).map(m => m.di_Black ?? m.disparate_impact ?? 0);
-  const eoHistory = historicalMetrics.slice(-12).map(m => m.tpr_ratio_Black ?? (1 - (m.equalized_odds_diff || 0)) ?? 0);
+  // ── Resolved values — context takes precedence ──
+  const diValue = hasRealData
+    ? (state.metrics!.averages.disparate_impact ?? 0.42)
+    : (legacyMetrics ? (legacyMetrics.di_Black ?? legacyMetrics.disparate_impact ?? 0.42) : 0.42);
 
-  // Fairness Score (Weighted average or just DI based for now)
-  const score = Math.round(diValue * 100);
-  const prevScore = historicalMetrics.length > 1 ? Math.round((historicalMetrics[historicalMetrics.length - 2].di_Black ?? historicalMetrics[historicalMetrics.length - 2].disparate_impact ?? diValue) * 100) : score;
+  const eoValue = hasRealData
+    ? Math.max(0, 1 - (state.metrics!.averages.equalized_odds_diff ?? 0.55))
+    : (legacyMetrics ? (legacyMetrics.tpr_ratio_Black ?? (1 - (legacyMetrics.equalized_odds_diff || 0))) : 0.45);
+
+  const diHistory = hasRealData
+    ? state.metrics!.weeks.slice(-12).map((w: any) => w.disparate_impact ?? 0)
+    : legacyHistorical.slice(-12).map(m => m.di_Black ?? m.disparate_impact ?? 0);
+
+  const eoHistory = hasRealData
+    ? state.metrics!.weeks.slice(-12).map((w: any) => Math.max(0, 1 - (w.equalized_odds_diff ?? 0.5)))
+    : legacyHistorical.slice(-12).map(m => m.tpr_ratio_Black ?? (1 - (m.equalized_odds_diff || 0)));
+
+  const score = hasRealData ? (state.metrics!.fairness_score ?? Math.round(diValue * 100)) : Math.round(diValue * 100);
+
+  const weeks = hasRealData ? state.metrics!.weeks : legacyHistorical;
+  const prevScore = weeks.length > 1
+    ? Math.round((weeks[weeks.length - 2].disparate_impact ?? weeks[weeks.length - 2].di_Black ?? diValue) * 100)
+    : score;
   const delta = score - prevScore;
 
-  const totalLivesTouched = historicalMetrics?.length > 0 ? historicalMetrics.reduce((acc, m) => acc + (m.count_priv || 0) + (m.count_unpriv || 0), 0) : 24932104;
-  const totalSavingsRaw = savings?.total_savings || 2340000;
-  
-  // Fake "at risk" savings if no intervention
-  const riskSavings = totalSavingsRaw * 1.4;
+  const weeksUntilViolation = hasRealData
+    ? state.forecast?.cross_week_number
+    : legacyForecast?.crossing_week;
+
+  const totalLivesTouched = weeks.reduce((acc: number, m: any) => acc + (m.count_priv || 0) + (m.count_unpriv || 0), 0) || 24932104;
+
+  const totalSavingsRaw = hasRealData
+    ? (state.financial?.total_savings ?? 0)
+    : (legacySavings?.total_savings || 2340000);
+
+  const riskSavings = hasRealData
+    ? (state.financial?.loss_current ?? totalSavingsRaw * 1.4)
+    : totalSavingsRaw * 1.4;
 
   return (
     <div className="p-12 pb-32 max-w-7xl mx-auto space-y-12">
@@ -87,7 +114,7 @@ export default function Home() {
         <FairnessScoreCard 
           score={score} 
           delta={delta} 
-          weeksUntilViolation={forecast?.crossing_week}
+          weeksUntilViolation={weeksUntilViolation}
         />
       </div>
 

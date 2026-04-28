@@ -2,30 +2,17 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useState, useEffect } from 'react';
-import AnalysisModal from '@/components/ui/AnalysisModal';
+import { useState } from 'react';
+import { useBiasBeacon, clearSessionStorage } from '@/context/BiasBeaconContext';
+import UploadWizard from '@/components/ui/UploadWizard';
 
 export default function Sidebar() {
   const pathname = usePathname();
-  const [isAnalysisModalOpen, setIsAnalysisModalOpen] = useState(false);
-  const [safetyScore, setSafetyScore] = useState(88);
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const { state, dispatch } = useBiasBeacon();
 
-  const fetchSafetyScore = async () => {
-    try {
-      const res = await fetch('/metrics/latest');
-      if (res.ok) {
-        const data = await res.json();
-        const di = data.disparate_impact || 0.88;
-        setSafetyScore(Math.round(di * 100));
-      }
-    } catch (err) {
-      console.error("Failed to fetch safety score", err);
-    }
-  };
-
-  useEffect(() => {
-    fetchSafetyScore();
-  }, []);
+  const safetyScore = state.metrics?.fairness_score ?? 88;
+  const hasSession = !!(state.session || state.isDemo);
 
   const navItems = [
     { name: "Health Overview", href: "/", icon: "query_stats" },
@@ -34,6 +21,12 @@ export default function Sidebar() {
     { name: "Simulation Studio", href: "/fix", icon: "auto_fix_high" },
     { name: "Audit Report", href: "/record", icon: "auto_stories" },
   ];
+
+  const handleUploadNew = () => {
+    dispatch({ type: 'RESET' });
+    clearSessionStorage();
+    setWizardOpen(true);
+  };
 
   return (
     <>
@@ -69,36 +62,53 @@ export default function Sidebar() {
         <div className="px-6 pb-4">
           <div className="p-6 rounded-3xl bg-sage/5 border border-sage/10 space-y-4">
             <h4 className="text-[10px] font-bold text-sage uppercase tracking-widest text-center">Data Management</h4>
-            <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-sage/20 border-dashed rounded-2xl cursor-pointer hover:bg-sage/10 transition-all group">
-              <div className="flex flex-col items-center justify-center pt-5 pb-6">
+
+            {hasSession && state.session ? (
+              /* Active session state */
+              <div className="space-y-3">
+                <div className="flex items-start gap-2 p-3 bg-sage/10 rounded-xl border border-sage/20">
+                  <span className="material-symbols-outlined text-sage text-base mt-0.5">check_circle</span>
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-charcoal truncate">{state.session.filename}</p>
+                    <p className="text-[10px] text-charcoal/40 mt-0.5">
+                      {state.session.row_count?.toLocaleString()} rows · {state.session.config?.protected_col}/{state.session.config?.target_col}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={handleUploadNew}
+                  className="w-full py-2 border border-charcoal/15 rounded-xl text-[10px] font-bold text-charcoal/50 uppercase tracking-widest hover:bg-charcoal/5 transition-all"
+                >
+                  Upload New File
+                </button>
+              </div>
+            ) : state.isDemo ? (
+              /* Demo mode state */
+              <div className="space-y-3">
+                <div className="flex items-center gap-2 p-3 bg-amber-50 rounded-xl border border-amber-100">
+                  <span className="material-symbols-outlined text-amber-500 text-base">science</span>
+                  <div>
+                    <p className="text-xs font-bold text-charcoal">Demo Dataset Active</p>
+                    <p className="text-[10px] text-charcoal/40">Bank Loans · Synthetic</p>
+                  </div>
+                </div>
+                <button
+                  onClick={handleUploadNew}
+                  className="w-full py-2 border border-charcoal/15 rounded-xl text-[10px] font-bold text-charcoal/50 uppercase tracking-widest hover:bg-charcoal/5 transition-all"
+                >
+                  Upload Your CSV
+                </button>
+              </div>
+            ) : (
+              /* No session: show upload zone */
+              <button
+                onClick={() => setWizardOpen(true)}
+                className="flex flex-col items-center justify-center w-full h-32 border-2 border-sage/20 border-dashed rounded-2xl cursor-pointer hover:bg-sage/10 transition-all group"
+              >
                 <span className="material-symbols-outlined text-sage text-2xl mb-2 group-hover:scale-110 transition-transform">upload_file</span>
                 <p className="text-[10px] font-bold text-sage/60 uppercase tracking-widest">Upload CSV</p>
-              </div>
-              <input 
-                type="file" 
-                className="hidden" 
-                accept=".csv" 
-                onChange={async (e) => {
-                  const file = e.target.files?.[0];
-                  if (!file) return;
-                  
-                  const formData = new FormData();
-                  formData.append('file', file);
-                  
-                  try {
-                    const res = await fetch('/api/upload-data', {
-                      method: 'POST',
-                      body: formData
-                    });
-                    if (res.ok) {
-                      window.location.reload();
-                    }
-                  } catch (err) {
-                    console.error("Upload failed", err);
-                  }
-                }}
-              />
-            </label>
+              </button>
+            )}
           </div>
         </div>
 
@@ -112,10 +122,7 @@ export default function Sidebar() {
         </div>
       </aside>
 
-      <AnalysisModal 
-        isOpen={isAnalysisModalOpen} 
-        onClose={() => setIsAnalysisModalOpen(false)} 
-      />
+      <UploadWizard isOpen={wizardOpen} onClose={() => setWizardOpen(false)} />
     </>
   );
 }

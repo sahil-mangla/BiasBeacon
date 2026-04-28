@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { fetchFromApi, API_BASE_URL } from '@/lib/api';
+import { useBiasBeacon } from '@/context/BiasBeaconContext';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 import { motion } from 'framer-motion';
 
@@ -13,6 +14,7 @@ export default function MitigationHub() {
   const [selectedFeatures, setSelectedFeatures] = useState<string[]>(['years_at_current_address']);
   const [weights, setWeights] = useState<Record<string, number>>({ 'years_at_current_address': 1.0 });
   const [threshold, setThreshold] = useState(0.80);
+  const { state } = useBiasBeacon();
 
   useEffect(() => {
     async function loadInitial() {
@@ -57,11 +59,16 @@ export default function MitigationHub() {
   const handleWeightChange = (f: string, w: number) =>
     setWeights(prev => ({ ...prev, [f]: w }));
 
-  const features = [
-    { id: 'years_at_current_address', name: 'Address Stability', psi: 0.28 },
-    { id: 'income',                   name: 'Annual Income',     psi: 0.12 },
-    { id: 'credit_score',             name: 'Credit History',    psi: 0.04 },
-  ];
+  const features = (state.rootcause?.drift_table?.length ?? 0) > 0
+    ? state.rootcause!.drift_table
+        .filter((d: any) => d.drifted || d.psi > 0.05)
+        .slice(0, 5)
+        .map((d: any) => ({ id: d.feature, name: d.feature.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()), psi: d.psi }))
+    : [
+        { id: 'years_at_current_address', name: 'Address Stability', psi: 0.28 },
+        { id: 'income', name: 'Annual Income', psi: 0.12 },
+        { id: 'credit_score', name: 'Credit History', psi: 0.04 },
+      ];
 
   const getChartData = (values: number[]) =>
     values.map((v, i) => ({ week: i + 1, di: parseFloat(v.toFixed(4)) }));

@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import Drawer from "@/components/ui/Drawer";
 import { fetchFromApi } from "@/lib/api";
+import { useBiasBeacon } from "@/context/BiasBeaconContext";
 import { Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Line, ComposedChart } from 'recharts';
 import { motion } from 'framer-motion';
 
@@ -11,11 +12,9 @@ export default function Path() {
   const [forecastData, setForecastData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [alerts, setAlerts] = useState<any[]>([]);
-  const [newAlert, setNewAlert] = useState({ 
-    threshold: 0.80, 
-    channel: 'Email', 
-    destination: '' 
-  });
+  const [newAlert, setNewAlert] = useState({ threshold: 0.80, channel: 'Email', destination: '' });
+  const { state } = useBiasBeacon();
+  const hasContextForecast = !!(state.forecast);
 
   useEffect(() => {
     if (typeof window !== 'undefined' && localStorage.getItem('bias_threshold')) {
@@ -24,6 +23,27 @@ export default function Path() {
   }, []);
 
   useEffect(() => {
+    // If we have context forecast, build chart data from it directly
+    if (hasContextForecast && state.forecast) {
+      const f = state.forecast;
+      const chartData: any[] = [];
+      f.historical.forEach((h: any, i: number) => {
+        chartData.push({ week: -f.historical.length + i, label: h.date, actual: h.di, threshold: newAlert.threshold, fullDate: h.date });
+      });
+      // Connect last historical to first forecast
+      if (f.historical.length > 0 && f.forecast.length > 0) {
+        chartData[chartData.length - 1].forecast = f.historical[f.historical.length - 1].di;
+        chartData[chartData.length - 1].lower = f.historical[f.historical.length - 1].di;
+        chartData[chartData.length - 1].upper = f.historical[f.historical.length - 1].di;
+      }
+      f.forecast.forEach((fc: any, i: number) => {
+        chartData.push({ week: i + 1, label: fc.date, forecast: fc.di, lower: fc.ci_lower, upper: fc.ci_upper, threshold: newAlert.threshold, fullDate: fc.date });
+      });
+      setForecastData({ raw: { crossing_week: f.cross_week_number, model: f.model_used, values: f.forecast.map((x: any) => x.di), lower: f.forecast.map((x: any) => x.ci_lower), upper: f.forecast.map((x: any) => x.ci_upper), forecast_dates: f.forecast.map((x: any) => x.date), historical: f.historical.map((x: any) => x.di), historical_dates: f.historical.map((x: any) => x.date) }, chartData });
+      setLoading(false);
+      return;
+    }
+
     const delayDebounceFn = setTimeout(() => {
       async function loadData() {
         try {
@@ -36,42 +56,22 @@ export default function Path() {
           if (data.historical) {
             data.historical.forEach((val: number, i: number) => {
               const dateStr = data.historical_dates?.[i] || '';
-              // Format date like "Nov 02"
               const dateLabel = dateStr ? new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: '2-digit' }) : `W${i}`;
-              
-              chartData.push({ 
-                week: -12 + i, 
-                label: dateLabel,
-                actual: val, 
-                threshold: newAlert.threshold,
-                fullDate: dateStr
-              });
+              chartData.push({ week: -12 + i, label: dateLabel, actual: val, threshold: newAlert.threshold, fullDate: dateStr });
             });
           }
-          
           if (data.historical && data.historical.length > 0 && data.values && data.values.length > 0) {
-             chartData[chartData.length - 1].forecast = data.historical[data.historical.length - 1];
-             chartData[chartData.length - 1].lower = data.historical[data.historical.length - 1];
-             chartData[chartData.length - 1].upper = data.historical[data.historical.length - 1];
+            chartData[chartData.length - 1].forecast = data.historical[data.historical.length - 1];
+            chartData[chartData.length - 1].lower = data.historical[data.historical.length - 1];
+            chartData[chartData.length - 1].upper = data.historical[data.historical.length - 1];
           }
-
           if (data.values) {
             data.values.forEach((val: number, i: number) => {
               const dateStr = data.forecast_dates?.[i] || '';
               const dateLabel = dateStr ? new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: '2-digit' }) : `F${i+1}`;
-
-              chartData.push({ 
-                week: i + 1, 
-                label: dateLabel,
-                forecast: val, 
-                lower: data.lower[i], 
-                upper: data.upper[i], 
-                threshold: newAlert.threshold,
-                fullDate: dateStr
-              });
+              chartData.push({ week: i + 1, label: dateLabel, forecast: val, lower: data.lower[i], upper: data.upper[i], threshold: newAlert.threshold, fullDate: dateStr });
             });
           }
-          
           setForecastData({ raw: data, chartData });
           setAlerts(alertList);
         } catch (err) {
@@ -82,9 +82,8 @@ export default function Path() {
       }
       loadData();
     }, 400);
-
     return () => clearTimeout(delayDebounceFn);
-  }, [newAlert.threshold]);
+  }, [newAlert.threshold, hasContextForecast]);
 
   const saveAlert = async () => {
     try {

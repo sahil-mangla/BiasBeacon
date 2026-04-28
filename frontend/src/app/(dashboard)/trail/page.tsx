@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { fetchFromApi } from '@/lib/api';
+import { useBiasBeacon } from '@/context/BiasBeaconContext';
 import { motion, AnimatePresence } from 'framer-motion';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, CartesianGrid } from 'recharts';
 
@@ -11,14 +12,28 @@ export default function Trail() {
   const [loading, setLoading] = useState(true);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
+  const { state } = useBiasBeacon();
+  const hasContextRootcause = !!(state.rootcause && !state.rootcause.skipped && state.rootcause.drift_table?.length > 0);
 
   useEffect(() => {
+    if (hasContextRootcause && state.rootcause) {
+      const formatted = state.rootcause.drift_table.map((d: any) => ({
+        id: d.feature,
+        name: d.feature.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
+        psi: d.psi,
+        ks_p: d.ks_pvalue,
+        rho: d.corr_with_di,
+        status: d.status === 'CRITICAL' ? 'Critical' : d.status === 'WARNING' ? 'Warning' : 'Stable',
+        raw: d
+      }));
+      setSuspects(formatted);
+      setLoading(false);
+      return;
+    }
+
     async function loadDrift() {
       try {
-        const driftData = await fetchFromApi('/drift'); // Overall drift (group == ALL)
-
-        // The API may return multiple rows per feature (one per week).
-        // Deduplicate by keeping the most-drifted (max PSI) row for each feature.
+        const driftData = await fetchFromApi('/drift');
         const byFeature: Record<string, any> = {};
         for (const d of driftData) {
           const key = d.feature;
@@ -27,28 +42,15 @@ export default function Trail() {
             byFeature[key] = { ...d, _psi: psi };
           }
         }
-
         const formattedSuspects = Object.values(byFeature).map((d: any) => {
           const psi = typeof d.psi === 'number' && isFinite(d.psi) ? d.psi : 0;
           const ks_p = typeof d.ks_pvalue === 'number' && isFinite(d.ks_pvalue) ? d.ks_pvalue : 1;
           let status = 'Stable';
           if (psi > 0.25) status = 'Critical';
           else if (psi > 0.1) status = 'Warning';
-
-          // Correlation with DI (rho) — mocked from PSI shape
           const rho = d.feature === 'years_at_current_address' ? 0.82 : Math.max(-1, Math.min(1, psi * 1.5 - 0.2));
-
-          return {
-            id: d.feature,
-            name: d.feature.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
-            psi,
-            ks_p,
-            rho,
-            status,
-            raw: d
-          };
+          return { id: d.feature, name: d.feature.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()), psi, ks_p, rho, status, raw: d };
         });
-
         setSuspects(formattedSuspects);
       } catch (err) {
         console.error("Failed to load drift data", err);
@@ -57,17 +59,26 @@ export default function Trail() {
       }
     }
     loadDrift();
-  }, []);
+  }, [hasContextRootcause]);
 
   const filteredSuspects = suspects
     .filter(s => s.name.toLowerCase().includes(searchTerm.toLowerCase()))
     .sort((a, b) => b.psi - a.psi);
 
-  const getMockHistogramData = (feature: string) => {
+  const getHistogramData = (s: any) => {
+    // Prefer real histogram arrays from context/API
+    if (s.raw?.baseline_dist?.length > 0 && s.raw?.current_dist?.length > 0) {
+      return s.raw.baseline_dist.map((b: any, i: number) => ({
+        name: b.bin,
+        baseline: b.count,
+        current: s.raw.current_dist[i]?.count ?? 0,
+      }));
+    }
+    // Fallback: synthetic bell curve
     return Array.from({ length: 12 }, (_, i) => ({
       name: i,
       baseline: Math.exp(-Math.pow(i - 4, 2) / 8) * 100,
-      current: Math.exp(-Math.pow(i - (feature === 'years_at_current_address' ? 7 : 5), 2) / 8) * 100,
+      current: Math.exp(-Math.pow(i - (s.id === 'years_at_current_address' ? 7 : 5), 2) / 8) * 100,
     }));
   };
 
@@ -199,7 +210,7 @@ export default function Trail() {
                               
                               <div className="h-64 bg-white/50 rounded-2xl border border-charcoal/5 p-6 relative min-h-[256px] min-w-[100px]">
                                 <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
-                                  <BarChart data={getMockHistogramData(s.id)}>
+                              <BarChart data={getHistogramData(s)}>
                                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(0,0,0,0.05)" />
                                     <Tooltip 
                                       cursor={{ fill: 'rgba(0,0,0,0.02)' }}
@@ -211,11 +222,11 @@ export default function Trail() {
                                               <div className="space-y-1">
                                                 <div className="flex justify-between gap-4">
                                                   <span className="text-[10px] font-outfit text-charcoal/60">Baseline</span>
-                                                  <span className="metric-number text-xs font-bold">{payload[0].value?.toFixed(1)}%</span>
+                                                  <span className="metric-number text-xs font-bold">{(Number(payload[0].value) || 0).toFixed(1)}%</span>
                                                 </div>
                                                 <div className="flex justify-between gap-4">
                                                   <span className="text-[10px] font-outfit text-terracotta">Current</span>
-                                                  <span className="metric-number text-xs font-bold text-terracotta">{payload[1].value?.toFixed(1)}%</span>
+                                                  <span className="metric-number text-xs font-bold text-terracotta">{(Number(payload[1].value) || 0).toFixed(1)}%</span>
                                                 </div>
                                               </div>
                                             </div>

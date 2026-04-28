@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import Sidebar from "@/components/layout/Sidebar";
 import FooterTicker from "@/components/layout/FooterTicker";
+import { BiasBeaconProvider } from "@/context/BiasBeaconContext";
 
 export const metadata: Metadata = {
   title: "Bias Beacon | Soulful Data",
@@ -26,7 +27,9 @@ export default function RootLayout({
         <div className="grain-overlay opacity-[0.03] pointer-events-none fixed inset-0 z-[60]" />
         <div className="mesh-gradient-bg fixed inset-0 z-[-1] opacity-[0.15]" />
         
-        {children}
+        <BiasBeaconProvider>
+          {children}
+        </BiasBeaconProvider>
       </body>
     </html>
   );
