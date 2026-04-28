@@ -12,11 +12,17 @@ async def lifespan(app: FastAPI):
     initialize_data()
     yield
 
+print("Starting Fairness Forecaster API...")
 app = FastAPI(title="Fairness Forecaster API", lifespan=lifespan)
+print("FastAPI app instance created.")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://frontend-436542799320.us-central1.run.app",
+        "http://localhost:3000",
+        "http://localhost:8080"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

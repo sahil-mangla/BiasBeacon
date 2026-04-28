@@ -2,9 +2,11 @@ import time
 import numpy as np
 import pandas as pd
 from backend.models.ml_logic import (
-    generate_synthetic_loan_data, compute_fairness_metrics, 
-    detect_feature_drift, forecast_fairness, simulate_reweighting_fix,
-    calculate_financial_impact
+    generate_synthetic_loan_data, 
+    calculate_financial_impact,
+    FairnessMetrics,
+    RootCauseAnalyzer,
+    ForecastingEngine
 )
 
 cache = {
@@ -17,21 +19,30 @@ cache = {
 
 def initialize_data():
     print("🚀 Initializing synthetic data and caching results...")
-    df, _ = generate_synthetic_loan_data(weeks=26, samples_per_week=500, seed=42)
-    weekly_metrics = compute_fairness_metrics(df, reference_group='White')
-    drift_df = detect_feature_drift(df, current_weeks=4, baseline_weeks=4)
+    df, reference_group = generate_synthetic_loan_data(weeks=26, samples_per_week=500, seed=42)
     
+    # 1. Fairness Metrics
+    fm = FairnessMetrics(df, target_col='approved', protected_col='group', 
+                         privileged_group='White', unprivileged_group='Black', date_col='date')
+    weekly_metrics = fm.compute_weekly()
 
-    
-    hist_di = weekly_metrics['di_Black'].tail(12).values
-    best_fc, cross_w, lower, upper, model_tag = forecast_fairness(hist_di, weeks_ahead=8, threshold=0.85)
+    # 2. Root Cause Analysis
+    rc_analyzer = RootCauseAnalyzer(df, target_col='approved', protected_col='group', 
+                                    fairness_series=weekly_metrics['disparate_impact'])
+    rc_analyzer.set_time_column(date_col='date', privileged_group='White', baseline_weeks=4)
+    drift_df = rc_analyzer.run_analysis()['drift_df']
+
+    # 3. Forecast
+    forecaster = ForecastingEngine(weekly_metrics, metric_name='disparate_impact', 
+                                   threshold=0.85, crossing_direction='below')
+    forecast_values, crossing_week, lower, upper, model_tag = forecaster.predict_crossing_date(future_weeks=8)
     
     forecast_data = {
-        "historical": [float(x) for x in hist_di],
-        "values": [float(x) for x in best_fc],
+        "historical": [float(x) for x in weekly_metrics['disparate_impact'].tail(12).values],
+        "values": [float(x) for x in forecast_values],
         "lower": [float(x) for x in lower],
         "upper": [float(x) for x in upper],
-        "crossing_week": int(cross_w) if cross_w is not None else None,
+        "crossing_week": int(crossing_week) if crossing_week is not None else None,
         "model": str(model_tag)
     }
     

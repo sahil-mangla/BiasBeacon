@@ -9,6 +9,7 @@
   --goldenrod: #F4D03F;
   --charcoal: #2C2C2C;
   --primary: #605e58;
+  --border: rgba(44, 44, 44, 0.08);
 }
 
 @theme {
@@ -31,23 +32,63 @@
   --color-outline: #7a776f;
   --color-outline-variant: #cac6bd;
 
-  --font-serif: "Cormorant Garamond", serif;
-  --font-sans: "Nunito", sans-serif;
+  --font-serif: "DM Serif Display", serif;
+  --font-outfit: "Outfit", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
 
-  --shadow-organic: 0 4px 20px rgba(100, 80, 60, 0.08);
+  --shadow-organic: 0 4px 24px rgba(100, 80, 60, 0.06);
 }
 
 * {
-  @apply border-charcoal/10;
+  @apply border-charcoal/8;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: var(--font-sans);
-  min-h-screen: 100vh;
+  font-family: var(--font-outfit);
+  min-height: 100vh;
   position: relative;
-  overflow-x: hidden;
+}
+
+.mesh-gradient-bg {
+  background: radial-gradient(at 0% 0%, #F4D03F 0px, transparent 50%),
+              radial-gradient(at 50% 0%, #C44536 0px, transparent 50%),
+              radial-gradient(at 100% 0%, #5E7B5C 0px, transparent 50%),
+              radial-gradient(at 0% 100%, #5E7B5C 0px, transparent 50%),
+              radial-gradient(at 50% 100%, #F4D03F 0px, transparent 50%),
+              radial-gradient(at 100% 100%, #C44536 0px, transparent 50%);
+  background-size: 200% 200%;
+  animation: mesh-move 20s ease infinite;
+}
+
+@keyframes mesh-move {
+  0% { background-position: 0% 0%; }
+  50% { background-position: 100% 100%; }
+  100% { background-position: 0% 0%; }
+}
+
+.glass-card {
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(255, 249, 239, 0.7);
+  box-shadow: var(--shadow-organic);
+  transition: all 0.3s ease;
+}
+
+.glass-card:hover {
+  border-color: rgba(44, 44, 44, 0.15);
+  transform: translateY(-2px);
+}
+
+.metric-number {
+  font-family: var(--font-mono);
+  letter-spacing: -0.02em;
+}
+
+.headline-serif {
+  font-family: var(--font-serif);
 }
 
 .grain-overlay {
@@ -58,29 +99,11 @@ body {
   height: 100%;
   pointer-events: none;
   z-index: 9999;
-  opacity: 0.03;
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
-}
-
-.hand-drawn-wobble {
-  border-radius: 255px 15px 225px 15px/15px 225px 15px 255px;
-}
-
-.dashed-pencil {
-  background-image: linear-gradient(to right, #7a776f 50%, transparent 50%);
-  background-size: 8px 1px;
-  background-repeat: repeat-x;
-}
-
-.ink-bleed {
-  filter: blur(0.4px) contrast(1.1);
-}
-
-.parchment-texture {
-  background-image: radial-gradient(circle at 50% 50%, #fff9ef 0%, #f7f0e4 100%);
 }
 
 /* Material Symbols Outlined */
 .material-symbols-outlined {
   font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
 }
+

@@ -1,190 +1,271 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { fetchFromApi, API_BASE_URL } from '@/lib/api';
+import { useBiasBeacon } from '@/context/BiasBeaconContext';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
+import { motion } from 'framer-motion';
 
 export default function MitigationHub() {
-  const [activeModel, setActiveModel] = useState('Hiring AI');
   const [isSimulating, setIsSimulating] = useState(false);
   const [showResult, setShowResult] = useState(false);
-  const [method, setMethod] = useState('Re-weighting');
+  const [forecastData, setForecastData] = useState<any>(null);
+  const [simResult, setSimResult] = useState<any>(null);
+  const [selectedFeatures, setSelectedFeatures] = useState<string[]>(['years_at_current_address']);
+  const [weights, setWeights] = useState<Record<string, number>>({ 'years_at_current_address': 1.0 });
+  const [threshold, setThreshold] = useState(0.80);
+  const { state } = useBiasBeacon();
 
-  const runSimulation = () => {
+  useEffect(() => {
+    async function loadInitial() {
+      try {
+        const data = await fetchFromApi('/forecast/predict');
+        setForecastData(data);
+      } catch (err) {
+        console.error('Failed to load forecast', err);
+      }
+    }
+    loadInitial();
+  }, []);
+
+  const runSimulation = async () => {
     setIsSimulating(true);
     setShowResult(false);
-    setTimeout(() => {
-      setIsSimulating(false);
+    try {
+      const result = await fetchFromApi('/api/simulate', {
+        method: 'POST',
+        body: JSON.stringify({
+          feature: selectedFeatures[0],
+          method: 'reweight',
+          reference_group: 'White',
+          threshold: threshold,
+        }),
+      });
+      setSimResult(result);
       setShowResult(true);
-    }, 2000);
+    } catch (err) {
+      console.error('Simulation failed', err);
+    } finally {
+      setIsSimulating(false);
+    }
   };
 
-  const models = ['Hiring AI', 'Credit Risk', 'Patient Care', 'Criminal Justice'];
-  const methods = ['Re-weighting', 'Adversarial Debiasing', 'Oversampling'];
+  const toggleFeature = (f: string) => {
+    setSelectedFeatures(prev =>
+      prev.includes(f) ? prev.filter(x => x !== f) : [...prev, f]
+    );
+  };
+
+  const handleWeightChange = (f: string, w: number) =>
+    setWeights(prev => ({ ...prev, [f]: w }));
+
+  const features = (state.rootcause?.drift_table?.length ?? 0) > 0
+    ? state.rootcause!.drift_table
+        .filter((d: any) => d.drifted || d.psi > 0.05)
+        .slice(0, 5)
+        .map((d: any) => ({ id: d.feature, name: d.feature.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()), psi: d.psi }))
+    : [
+        { id: 'years_at_current_address', name: 'Address Stability', psi: 0.28 },
+        { id: 'income', name: 'Annual Income', psi: 0.12 },
+        { id: 'credit_score', name: 'Credit History', psi: 0.04 },
+      ];
+
+  const getChartData = (values: number[]) =>
+    values.map((v, i) => ({ week: i + 1, di: parseFloat(v.toFixed(4)) }));
+
+  // Use real DI series from API after simulation; fall back to forecast before
+  const origChartData  = showResult && simResult?.orig_di_series
+    ? getChartData(simResult.orig_di_series)
+    : getChartData(forecastData?.values || []);
+  const fixedChartData = showResult && simResult?.sim_di_series
+    ? getChartData(simResult.sim_di_series)
+    : [];
+
+  // Derived display values — all come from the real API response
+  const improvement      = simResult ? Math.abs(simResult.improvement * 100).toFixed(1) : null;
+  const livesAffected    = simResult?.lives_affected ?? 0;
+  const financialSavings = simResult?.financial_savings ?? 0;
+  const gapClosed        = simResult ? (simResult.gap_closed * 100).toFixed(2) : null;
+  const correctedDI      = simResult ? simResult.corrected_di.toFixed(3) : null;
 
   return (
-    <div className="p-12 pb-32 max-w-6xl mx-auto">
-      {/* Header Section */}
-      <header className="mb-12 text-center">
-        <span className="font-sans font-bold text-[10px] tracking-widest text-charcoal/50 bg-cream px-3 py-1 rounded-full uppercase">Simulation Studio</span>
-        <h1 className="font-serif text-5xl text-charcoal mt-4">The Mitigation Hub</h1>
-        <p className="font-serif text-charcoal/60 italic mt-2 text-xl max-w-2xl mx-auto">
-          A workspace to experiment with restorative interventions across diverse algorithmic landscapes.
-        </p>
-      </header>
-
-      {/* Model Selector Tabs */}
-      <div className="flex justify-center mb-12 gap-4 border-b border-charcoal/10">
-        {models.map((model) => (
-          <button 
-            key={model}
-            onClick={() => setActiveModel(model)}
-            className={`px-6 py-2 font-serif italic text-lg transition-all border-b-2 ${activeModel === model ? 'border-charcoal text-charcoal' : 'border-transparent text-charcoal/30 hover:text-charcoal/60'}`}
-          >
-            {model}
-          </button>
-        ))}
-      </div>
-
-      <div className="relative grid grid-cols-1 lg:grid-cols-2 gap-12 items-stretch">
-        {/* LEFT CARD: The Current Storm */}
-        <section className="bg-cream p-10 shadow-organic border border-charcoal/5 rounded-2xl relative overflow-hidden flex flex-col group">
-          <div className="flex justify-between items-start mb-6">
-            <h2 className="font-serif text-3xl text-charcoal italic">The Current Storm</h2>
-            <span className="px-3 py-1 bg-terracotta/10 text-terracotta font-sans text-[10px] font-bold rounded-full uppercase tracking-widest">Detected Bias</span>
-          </div>
-          
-          <div className="relative w-full aspect-video mb-8 bg-charcoal/5 rounded-xl overflow-hidden border border-charcoal/10">
-            <img 
-              alt="Stormy weather illustration" 
-              className="w-full h-full object-cover grayscale opacity-60 mix-blend-multiply" 
-              src="https://lh3.googleusercontent.com/aida-public/AB6AXuDK0-fypMj59jAh99F-Bd8t2Wf97RLqbV2NtlC3hOoJtf5hAUF3x98HWy0LpIx8Z93zoaucUpMqOggXzcBSOv2VikLX4XSQV_KBw10sGQyrAjmZBR-t-giu9dQBU68MxR2K3ZF_NWEC_ZW2BiXq6TaHoraL-Ac3YkK_XoWht1Fzyq-hdbO7C-7Iq4scsHzG8mcK_ZsdrFsdMCCZC43HCqJ8kpFe6RFRrnthMeLz1ejtE2bWuFTTKpSvL7ED3ZBX5OX7q4dhxZPhVrA"
-            />
-            <div className="absolute inset-0 bg-charcoal/20 flex items-center justify-center">
-              <span className="material-symbols-outlined text-white text-6xl opacity-40">cloudy_snowing</span>
-            </div>
-          </div>
-
-          <div className="space-y-6 flex-1">
-            <div className="flex items-center gap-4 p-4 bg-white/50 border-l-4 border-charcoal/20">
-              <span className="material-symbols-outlined text-charcoal/40">warning</span>
-              <p className="font-sans text-sm text-charcoal/70">Model "{activeModel}-v2" shows 32% lower recall for candidates from underrepresented zip codes.</p>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="p-4 bg-white/50 rounded-xl border border-charcoal/5">
-                <span className="text-[10px] font-bold text-charcoal/40 uppercase tracking-widest">Fairness Score</span>
-                <p className="font-serif text-3xl text-charcoal">42%</p>
-              </div>
-              <div className="p-4 bg-white/50 rounded-xl border border-charcoal/5">
-                <span className="text-[10px] font-bold text-charcoal/40 uppercase tracking-widest">Demographic Parity</span>
-                <p className="font-serif text-3xl text-charcoal">Low</p>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* BETWEEN: The Deployment Bridge */}
-        <div className="lg:absolute lg:left-1/2 lg:-translate-x-1/2 lg:top-1/2 lg:-translate-y-1/2 z-20 flex flex-col items-center justify-center py-8 lg:py-0">
-          <div className="hidden lg:block h-20 w-px dashed-pencil opacity-30 mb-4"></div>
-          <button 
-            onClick={runSimulation}
-            disabled={isSimulating}
-            className={`bg-charcoal text-white py-6 px-10 rounded-full shadow-2xl hover:scale-105 transition-all flex flex-col items-center gap-1 group border-[6px] border-[#FDF8F0] relative disabled:opacity-50 disabled:scale-100 ${isSimulating ? 'animate-pulse' : ''}`}
-          >
-            <span className="material-symbols-outlined text-4xl mb-1">{isSimulating ? 'hourglass_top' : 'inventory_2'}</span>
-            <span className="font-sans font-bold tracking-widest text-[9px] uppercase">
-              {isSimulating ? 'Compiling Kit...' : 'Deploy Mitigation Kit'}
-            </span>
-            {!isSimulating && !showResult && (
-              <div className="absolute -top-2 -right-2 bg-terracotta text-white text-[9px] font-bold px-3 py-1 rounded-full animate-bounce">DEPLOY</div>
-            )}
-          </button>
-          <div className="hidden lg:block h-20 w-px dashed-pencil opacity-30 mt-4"></div>
-        </div>
-
-        {/* RIGHT CARD: Predicted Restoration */}
-        <section className={`bg-cream p-10 shadow-organic border transition-all rounded-2xl relative overflow-hidden flex flex-col ${showResult ? 'border-sage/30' : 'border-charcoal/5 opacity-50 grayscale'}`}>
-          <div className="flex justify-between items-start mb-6">
-            <h2 className="font-serif text-3xl text-charcoal italic">Predicted Restoration</h2>
-            <span className={`px-3 py-1 font-sans text-[10px] font-bold rounded-full uppercase tracking-widest ${showResult ? 'bg-sage/10 text-sage' : 'bg-charcoal/10 text-charcoal'}`}>
-              {showResult ? 'Proposed Fix' : 'Simulated State'}
-            </span>
-          </div>
-
-          {/* Toggle Controls */}
-          <div className="flex flex-wrap gap-2 mb-8">
-            {methods.map((m) => (
-              <button 
-                key={m}
-                onClick={() => setMethod(m)}
-                className={`px-4 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest border transition-all ${method === m ? 'bg-charcoal text-white border-charcoal' : 'bg-white/50 text-charcoal/40 border-charcoal/10 hover:border-charcoal/30'}`}
-              >
-                {m}
-              </button>
-            ))}
-          </div>
-
-          <div className="relative w-full aspect-video mb-8 bg-charcoal/5 rounded-xl overflow-hidden border border-charcoal/10">
-            <img 
-              alt="Clearing skies illustration" 
-              className={`w-full h-full object-cover transition-all duration-1000 ${showResult ? 'opacity-100' : 'opacity-20'}`} 
-              src="https://lh3.googleusercontent.com/aida-public/AB6AXuDQVeEHxG43B832ZclvblS_EMtltkTxAH53viXLgku2YDlbL9nTkHetsvCP6hcKlyxmBDg8ucPpV_0fvQOv9iaflGIaqErBfvi_oiZA4ipTT_0bB9RPIIUPljDKdeSg3nyKS-Plyv0mM52Wq3FqxBGn58Ib1mCNJkOsxFw4z4Z5CbwYQ5Cs5aJJD7FVpa_9Mld1mms02ZvKfdkH-L-sCt6fRM5VXitzM2D5iM8w1W3Z06ZGUOqRNuJlz6DMM4vjMEevyIwen4dnn44"
-            />
-            {showResult && <div className="absolute inset-0 bg-goldenrod/5 mix-blend-overlay"></div>}
-            <div className="absolute inset-0 flex items-center justify-center">
-              <span className={`material-symbols-outlined text-6xl ${showResult ? 'text-goldenrod animate-pulse' : 'text-charcoal/10'}`}>
-                {showResult ? 'wb_sunny' : 'wb_cloudy'}
-              </span>
-            </div>
-          </div>
-
-          <div className="space-y-6 flex-1">
-            <div className={`flex items-center gap-4 p-4 border-l-4 transition-all ${showResult ? 'bg-sage/5 border-sage' : 'bg-white/50 border-charcoal/20'}`}>
-              <span className={`material-symbols-outlined ${showResult ? 'text-sage' : 'text-charcoal/40'}`}>auto_awesome</span>
-              <p className="font-sans text-sm text-charcoal/70">
-                {showResult 
-                  ? `${method} samples by socio-economic background predicted to close the gap by 28 points.`
-                  : "Deploy the mitigation kit to visualize the restorative potential of your chosen intervention."
-                }
-              </p>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="p-4 bg-white/50 rounded-xl border border-charcoal/5">
-                <span className="text-[10px] font-bold text-charcoal/40 uppercase tracking-widest">Est. Fairness</span>
-                <p className={`font-serif text-3xl ${showResult ? 'text-sage' : 'text-charcoal'}`}>{showResult ? '96%' : '--%'}</p>
-              </div>
-              <div className="p-4 bg-white/50 rounded-xl border border-charcoal/5">
-                <span className="text-[10px] font-bold text-charcoal/40 uppercase tracking-widest">Dignity Index</span>
-                <p className={`font-serif text-3xl ${showResult ? 'text-sage' : 'text-charcoal'}`}>{showResult ? 'High' : '--'}</p>
-              </div>
-            </div>
-          </div>
-        </section>
-      </div>
-
-      {/* Narrative & Lantern Keeper Section */}
-      <div className="mt-20 grid grid-cols-1 md:grid-cols-3 gap-12">
-        <div className="md:col-span-2">
-          <div className="flex gap-8 items-start">
-            <div className="w-1 h-32 bg-charcoal/10 flex-shrink-0"></div>
-            <div className="pt-2">
-              <p className="font-serif italic text-3xl text-charcoal/70 leading-snug">
-                "Justice is not a destination, but a constant recalibration of our tools toward the light of human dignity."
-              </p>
-              <footer className="mt-4 text-[10px] font-bold text-charcoal/30 uppercase tracking-widest">— Dr. Elara Vance, Ethics Lead</footer>
-            </div>
-          </div>
-        </div>
-
-        {/* Lantern Keeper Side Note */}
-        <div className="bg-charcoal/5 p-8 border border-charcoal/10 rounded-2xl relative shadow-inner">
-          <div className="flex items-center gap-3 mb-4">
-            <span className="material-symbols-outlined text-charcoal">lightbulb</span>
-            <span className="font-serif italic text-xl text-charcoal">The Lantern Keeper</span>
-          </div>
+    <div className="p-12 pb-32 max-w-7xl mx-auto flex flex-col lg:flex-row gap-12">
+      {/* LEFT: CONTROL PANEL */}
+      <aside className="w-full lg:w-[320px] space-y-8 shrink-0">
+        <div className="space-y-4">
+          <span className="text-[10px] font-bold text-charcoal/40 uppercase tracking-widest">Workspace</span>
+          <h1 className="headline-serif text-5xl text-charcoal">Simulation Studio</h1>
           <p className="text-sm text-charcoal/60 leading-relaxed italic">
-            "Remember: a model is but a mirror. When the glass is warped, we do not simply polish the surface—we must understand why the heat of the world bent it so."
+            Experiment with restorative interventions to delay projected violations.
           </p>
         </div>
-      </div>
+
+        {/* Threshold Slider */}
+        <div className="space-y-3 p-5 glass-card border-none">
+          <div className="flex justify-between items-center">
+            <h4 className="text-[10px] font-bold text-charcoal/40 uppercase tracking-widest">DI Threshold</h4>
+            <span className="font-mono font-bold text-sage text-sm">{threshold.toFixed(2)}</span>
+          </div>
+          <input
+            type="range" min="0.60" max="0.95" step="0.01"
+            value={threshold}
+            onChange={e => { setThreshold(parseFloat(e.target.value)); setShowResult(false); }}
+            className="w-full h-1 bg-charcoal/10 rounded-full appearance-none accent-sage cursor-pointer"
+          />
+          <div className="flex justify-between text-[10px] text-charcoal/30 font-mono">
+            <span>0.60 (lax)</span><span>0.80 (US)</span><span>0.95 (strict)</span>
+          </div>
+        </div>
+
+        {/* Feature Toggles */}
+        <div className="space-y-4">
+          <h4 className="text-[10px] font-bold text-charcoal/40 uppercase tracking-widest">Select Features to Balance</h4>
+          <div className="space-y-3">
+            {features.map(f => (
+              <div key={f.id} className={`p-4 glass-card border-none transition-all ${selectedFeatures.includes(f.id) ? 'bg-sage/10 ring-1 ring-sage/30' : 'opacity-60'}`}>
+                <div className="flex justify-between items-center mb-4">
+                  <span className="font-bold text-sm text-charcoal">{f.name}</span>
+                  <button
+                    onClick={() => toggleFeature(f.id)}
+                    className={`w-10 h-5 rounded-full transition-all relative ${selectedFeatures.includes(f.id) ? 'bg-sage' : 'bg-charcoal/20'}`}
+                  >
+                    <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${selectedFeatures.includes(f.id) ? 'left-6' : 'left-1'}`} />
+                  </button>
+                </div>
+                {selectedFeatures.includes(f.id) && (
+                  <div className="space-y-2">
+                    <div className="flex justify-between text-[10px] font-mono text-charcoal/40">
+                      <span>Weight</span><span>{(weights[f.id] || 1).toFixed(1)}x</span>
+                    </div>
+                    <input
+                      type="range" min="0.1" max="2.0" step="0.1"
+                      value={weights[f.id] || 1}
+                      onChange={e => handleWeightChange(f.id, parseFloat(e.target.value))}
+                      className="w-full h-1 bg-charcoal/10 rounded-full appearance-none accent-sage cursor-pointer"
+                    />
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <button
+          onClick={runSimulation}
+          disabled={isSimulating || selectedFeatures.length === 0}
+          className="w-full py-6 bg-charcoal text-white rounded-2xl font-bold uppercase tracking-widest text-xs shadow-2xl hover:scale-[1.02] active:scale-95 transition-all disabled:opacity-50"
+        >
+          {isSimulating ? 'Compiling Trajectory…' : 'Run Simulation'}
+        </button>
+      </aside>
+
+      {/* RIGHT: RESULTS */}
+      <main className="flex-1 space-y-12 min-w-0">
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
+          {/* Before */}
+          <div className="glass-card p-8 space-y-6">
+            <h4 className="text-[10px] font-bold text-terracotta bg-terracotta/5 px-3 py-1 rounded-full w-max uppercase tracking-widest">Current Trajectory</h4>
+            <div className="h-64 w-full min-h-[256px] min-w-[100px]">
+              <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
+                <LineChart data={origChartData}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(0,0,0,0.05)" />
+                  <XAxis dataKey="week" hide />
+                  <YAxis domain={[0, 1.1]} hide />
+                  <Tooltip formatter={(v: any) => v?.toFixed(3)} />
+                  <ReferenceLine y={threshold} stroke="#C44536" strokeDasharray="4 4"
+                    label={{ value: `≥${threshold.toFixed(2)}`, position: 'right', fontSize: 10, fill: '#C44536' }} />
+                  <Line type="monotone" dataKey="di" stroke="#C44536" strokeWidth={3} dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+            <div className="text-center">
+              <p className="text-sm font-serif italic text-charcoal/40">
+                Predicted violation in Week {forecastData?.crossing_week ?? '?'}
+              </p>
+            </div>
+          </div>
+
+          {/* After */}
+          <div className={`glass-card p-8 space-y-6 transition-all duration-700 ${showResult ? 'opacity-100' : 'opacity-20 grayscale'}`}>
+            <h4 className="text-[10px] font-bold text-sage bg-sage/5 px-3 py-1 rounded-full w-max uppercase tracking-widest">Fair Model Forecast</h4>
+            <div className="h-64 w-full min-h-[256px] min-w-[100px]">
+              <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
+                <LineChart data={fixedChartData}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(0,0,0,0.05)" />
+                  <XAxis dataKey="week" hide />
+                  <YAxis domain={[0, 1.1]} hide />
+                  <Tooltip formatter={(v: any) => v?.toFixed(3)} />
+                  <ReferenceLine y={threshold} stroke="#C44536" strokeDasharray="4 4"
+                    label={{ value: `≥${threshold.toFixed(2)}`, position: 'right', fontSize: 10, fill: '#C44536' }} />
+                  {showResult && <Line type="monotone" dataKey="di" stroke="#5E7B5C" strokeWidth={3} dot={false} />}
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+            <div className="text-center">
+              <p className="text-sm font-serif italic text-sage">
+                {showResult
+                  ? `Corrected DI: ${correctedDI} (+${improvement}% improvement)`
+                  : 'Run simulation to see impact'}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* DYNAMIC IMPACT STATS */}
+        {showResult && (
+          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-8">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+              <div className="p-6 glass-card bg-white/50 border-none">
+                <p className="text-[10px] font-bold text-charcoal/40 uppercase tracking-widest mb-2">Gap Closed</p>
+                <p className="headline-serif text-3xl text-sage">{gapClosed}%</p>
+                <p className="text-[10px] text-charcoal/30 mt-1">vs {threshold.toFixed(2)} threshold</p>
+              </div>
+              <div className="p-6 glass-card bg-white/50 border-none">
+                <p className="text-[10px] font-bold text-charcoal/40 uppercase tracking-widest mb-2">DI Improvement</p>
+                <p className="headline-serif text-3xl text-sage">+{improvement}%</p>
+                <p className="text-[10px] text-charcoal/30 mt-1">
+                  {simResult?.baseline_di?.toFixed(3)} → {correctedDI}
+                </p>
+              </div>
+              <div className="p-6 glass-card bg-white/50 border-none">
+                <p className="text-[10px] font-bold text-charcoal/40 uppercase tracking-widest mb-2">Lives Impacted</p>
+                <p className="headline-serif text-3xl text-sage">{livesAffected.toLocaleString()}</p>
+                <p className="text-[10px] text-charcoal/30 mt-1">annualised minority applicants</p>
+              </div>
+              <div className="p-6 glass-card bg-white/50 border-none">
+                <p className="text-[10px] font-bold text-charcoal/40 uppercase tracking-widest mb-2">Financial Savings</p>
+                <p className="headline-serif text-3xl text-sage">${(financialSavings / 1000).toFixed(0)}K</p>
+                <p className="text-[10px] text-charcoal/30 mt-1">recovered loan revenue</p>
+              </div>
+            </div>
+
+            <div className="bg-sage text-white p-10 rounded-3xl shadow-xl flex items-center gap-8 relative overflow-hidden">
+              <div className="w-16 h-16 rounded-full bg-white/20 flex items-center justify-center shrink-0">
+                <span className="material-symbols-outlined text-4xl">verified</span>
+              </div>
+              <div className="space-y-2 relative z-10">
+                <p className="font-serif text-xl italic leading-relaxed">
+                  Re-weighting <strong>'{selectedFeatures[0]?.replace(/_/g, ' ')}'</strong> closes{' '}
+                  <strong>{gapClosed}%</strong> of the fairness gap at threshold {threshold.toFixed(2)}, impacting{' '}
+                  <strong>{livesAffected.toLocaleString()} minority applicants</strong> annually and recovering
+                  approximately <strong>${(financialSavings / 1000).toFixed(0)}K</strong> in loan revenue.
+                </p>
+              </div>
+              <div className="absolute top-0 right-0 w-64 h-full bg-white/5 rotate-12 translate-x-24" />
+            </div>
+
+            <div className="flex justify-center">
+              <a
+                href={`/api/fix-script?feature=${selectedFeatures[0]}`}
+                className="flex items-center gap-3 px-10 py-4 bg-charcoal text-white rounded-xl font-bold uppercase tracking-widest text-xs hover:scale-105 transition-all shadow-2xl"
+              >
+                <span className="material-symbols-outlined">download</span>
+                Download fix.py
+              </a>
+            </div>
+          </motion.div>
+        )}
+      </main>
     </div>
   );
 }

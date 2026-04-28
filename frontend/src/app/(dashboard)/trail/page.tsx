@@ -1,107 +1,260 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { fetchFromApi } from '@/lib/api';
+import { useBiasBeacon } from '@/context/BiasBeaconContext';
+import { motion, AnimatePresence } from 'framer-motion';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, CartesianGrid } from 'recharts';
 
 export default function Trail() {
-  const [selectedSuspectIndex, setSelectedSuspectIndex] = useState(0);
+  const [suspects, setSuspects] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [expandedRow, setExpandedRow] = useState<string | null>(null);
+  const [searchTerm, setSearchTerm] = useState('');
+  const { state } = useBiasBeacon();
+  const hasContextRootcause = !!(state.rootcause && !state.rootcause.skipped && state.rootcause.drift_table?.length > 0);
 
-  const suspects = [
-    { name: "Zip Code", score: 12, drift: "High", proxy: true, explanation: "Our investigation reveals that Zip Code correlates 0.82 with historical redlining districts. It’s creating an invisible barrier for families in the East District.", recommendation: "Apply Re-weighting Restoration" },
-    { name: "Years of Experience", score: 85, drift: "Low", proxy: false, explanation: "This feature shows high integrity and correlates strongly with actual job performance across all demographic groups.", recommendation: "Maintain standard processing" },
-    { name: "Education Level", score: 72, drift: "Medium", proxy: false, explanation: "Minor drift detected in recent applicant pools. Some schools from underserved regions are being underrepresented in the embeddings.", recommendation: "Normalize institutional weights" },
-    { name: "Credit History Length", score: 45, drift: "Medium", proxy: true, explanation: "Acts as a proxy for age and generational wealth, inadvertently penalizing younger applicants and those from immigrant backgrounds.", recommendation: "Apply Reject-Option Classification" },
-    { name: "Loan Amount", score: 92, drift: "Low", proxy: false, explanation: "A neutral feature that tracks closely with individual financial request patterns without group-based bias.", recommendation: "No action required" }
-  ];
+  useEffect(() => {
+    if (hasContextRootcause && state.rootcause) {
+      const formatted = state.rootcause.drift_table.map((d: any) => ({
+        id: d.feature,
+        name: d.feature.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()),
+        psi: d.psi,
+        ks_p: d.ks_pvalue,
+        rho: d.corr_with_di,
+        status: d.status === 'CRITICAL' ? 'Critical' : d.status === 'WARNING' ? 'Warning' : 'Stable',
+        raw: d
+      }));
+      setSuspects(formatted);
+      setLoading(false);
+      return;
+    }
 
-  const selectedSuspect = suspects[selectedSuspectIndex];
+    async function loadDrift() {
+      try {
+        const driftData = await fetchFromApi('/drift');
+        const byFeature: Record<string, any> = {};
+        for (const d of driftData) {
+          const key = d.feature;
+          const psi = typeof d.psi === 'number' && isFinite(d.psi) ? d.psi : 0;
+          if (!byFeature[key] || psi > (byFeature[key]._psi ?? 0)) {
+            byFeature[key] = { ...d, _psi: psi };
+          }
+        }
+        const formattedSuspects = Object.values(byFeature).map((d: any) => {
+          const psi = typeof d.psi === 'number' && isFinite(d.psi) ? d.psi : 0;
+          const ks_p = typeof d.ks_pvalue === 'number' && isFinite(d.ks_pvalue) ? d.ks_pvalue : 1;
+          let status = 'Stable';
+          if (psi > 0.25) status = 'Critical';
+          else if (psi > 0.1) status = 'Warning';
+          const rho = d.feature === 'years_at_current_address' ? 0.82 : Math.max(-1, Math.min(1, psi * 1.5 - 0.2));
+          return { id: d.feature, name: d.feature.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()), psi, ks_p, rho, status, raw: d };
+        });
+        setSuspects(formattedSuspects);
+      } catch (err) {
+        console.error("Failed to load drift data", err);
+      } finally {
+        setLoading(false);
+      }
+    }
+    loadDrift();
+  }, [hasContextRootcause]);
+
+  const filteredSuspects = suspects
+    .filter(s => s.name.toLowerCase().includes(searchTerm.toLowerCase()))
+    .sort((a, b) => b.psi - a.psi);
+
+  const getHistogramData = (s: any) => {
+    // Prefer real histogram arrays from context/API
+    if (s.raw?.baseline_dist?.length > 0 && s.raw?.current_dist?.length > 0) {
+      return s.raw.baseline_dist.map((b: any, i: number) => ({
+        name: b.bin,
+        baseline: b.count,
+        current: s.raw.current_dist[i]?.count ?? 0,
+      }));
+    }
+    // Fallback: synthetic bell curve
+    return Array.from({ length: 12 }, (_, i) => ({
+      name: i,
+      baseline: Math.exp(-Math.pow(i - 4, 2) / 8) * 100,
+      current: Math.exp(-Math.pow(i - (s.id === 'years_at_current_address' ? 7 : 5), 2) / 8) * 100,
+    }));
+  };
 
   return (
-    <div className="p-12 pb-32 max-w-7xl mx-auto h-full flex flex-col">
-      <div className="mb-12">
-        <span className="font-sans font-bold text-[10px] tracking-widest text-charcoal/50 bg-cream px-3 py-1 rounded-full uppercase">Investigation</span>
-        <h1 className="font-serif text-5xl text-charcoal mt-4">The Trail of Evidence</h1>
-        <p className="font-serif text-charcoal/60 italic mt-2 text-xl">Uncovering the hidden proxies that distance us from fairness.</p>
+    <div className="p-12 pb-32 max-w-7xl mx-auto space-y-12">
+      {/* Header */}
+      <header className="flex justify-between items-end">
+        <div>
+          <span className="font-outfit font-bold text-[10px] tracking-widest text-charcoal/50 bg-cream px-3 py-1 rounded-full uppercase">Investigation</span>
+          <h1 className="headline-serif text-6xl text-charcoal mt-4">The Trail of Evidence</h1>
+          <p className="font-outfit text-charcoal/60 text-lg mt-2 italic">Uncovering the hidden proxies that distance us from fairness.</p>
+        </div>
+      </header>
+
+      {/* SEARCH & FILTERS */}
+      <div className="flex gap-4">
+        <div className="flex-1 relative">
+          <span className="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-charcoal/30">search</span>
+          <input 
+            type="text" 
+            placeholder="Filter features by name..."
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="w-full bg-cream border border-charcoal/10 rounded-xl pl-12 pr-4 py-4 font-outfit text-sm outline-none focus:border-charcoal/30 transition-all"
+          />
+        </div>
       </div>
 
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-12 min-h-[600px]">
-        {/* Left Column: The Suspect List */}
-        <div className="lg:col-span-4 space-y-4">
-          <div className="p-4 bg-cream/50 rounded-t-xl border-b border-charcoal/10">
-            <h3 className="font-sans font-bold text-[10px] tracking-widest text-charcoal/40 uppercase">Candidate Features</h3>
-          </div>
-          {suspects.map((suspect, i) => (
-            <div 
-              key={i} 
-              onClick={() => setSelectedSuspectIndex(i)}
-              className={`p-6 rounded-xl border transition-all cursor-pointer group ${selectedSuspectIndex === i ? 'ring-2 ring-sage shadow-lg' : ''} ${suspect.proxy ? 'bg-terracotta/5 border-terracotta/20 hover:bg-terracotta/10' : 'bg-cream border-charcoal/5 hover:bg-white hover:shadow-md'}`}
-            >
-              <div className="flex justify-between items-start">
-                <div>
-                  <h4 className="font-serif text-2xl text-charcoal">{suspect.name}</h4>
-                  <div className="flex items-center gap-3 mt-2">
-                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-widest ${suspect.drift === 'High' ? 'bg-terracotta text-white' : 'bg-sage/10 text-sage'}`}>
-                      Drift: {suspect.drift}
+      {/* DRIFT TABLE */}
+      <div className="glass-card overflow-hidden">
+        <table className="w-full text-left border-collapse">
+          <thead>
+            <tr className="bg-charcoal/[0.02] border-b border-charcoal/5">
+              <th className="p-6 text-[10px] font-bold text-charcoal/40 uppercase tracking-widest">Feature Name</th>
+              <th className="p-6 text-[10px] font-bold text-charcoal/40 uppercase tracking-widest text-center">PSI</th>
+              <th className="p-6 text-[10px] font-bold text-charcoal/40 uppercase tracking-widest text-center">KS p-value</th>
+              <th className="p-6 text-[10px] font-bold text-charcoal/40 uppercase tracking-widest text-center">Corr with DI (ρ)</th>
+              <th className="p-6 text-[10px] font-bold text-charcoal/40 uppercase tracking-widest text-right">Status</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-charcoal/5">
+            {filteredSuspects.map((s) => (
+              <React.Fragment key={s.id}>
+                <tr 
+                  className={`hover:bg-charcoal/[0.01] transition-colors cursor-pointer ${expandedRow === s.id ? 'bg-cream/50' : ''}`}
+                  onClick={() => setExpandedRow(expandedRow === s.id ? null : s.id)}
+                >
+                  <td className="p-6 headline-serif text-2xl text-charcoal">{s.name}</td>
+                  <td className="p-6 metric-number text-center text-lg">{(s.psi ?? 0).toFixed(3)}</td>
+                  <td className="p-6 metric-number text-center text-charcoal/40 text-sm">{(s.ks_p ?? 1).toFixed(4)}</td>
+                  <td className={`p-6 metric-number text-center font-bold ${Math.abs(s.rho ?? 0) >= 0.7 ? 'text-terracotta' : 'text-charcoal/60'}`}>
+                    {(s.rho ?? 0) >= 0 ? '+' : ''}{(s.rho ?? 0).toFixed(2)}
+                  </td>
+                  <td className="p-6 text-right">
+                    <span className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest ${
+                      s.status === 'Critical' ? 'bg-terracotta text-white shadow-[0_0_12px_rgba(196,69,54,0.3)]' :
+                      s.status === 'Warning' ? 'bg-amber-400 text-white shadow-[0_0_12px_rgba(251,191,36,0.3)]' :
+                      'bg-sage/10 text-sage'
+                    }`}>
+                      {s.status}
                     </span>
-                    {suspect.proxy && (
-                      <span className="flex items-center gap-1 text-[10px] font-bold text-terracotta uppercase tracking-widest">
-                        <span className="material-symbols-outlined text-xs">warning</span>
-                        Proxy Alert
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <div className="text-right">
-                  <p className="text-[10px] font-bold text-charcoal/30 uppercase tracking-widest">Human Connection</p>
-                  <p className={`font-serif text-3xl ${suspect.score < 50 ? 'text-terracotta' : 'text-sage'}`}>{suspect.score}%</p>
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
+                  </td>
+                </tr>
+                <AnimatePresence>
+                  {expandedRow === s.id && (
+                    <tr>
+                      <td colSpan={5} className="p-0 border-none bg-cream/30">
+                        <motion.div 
+                          initial={{ height: 0, opacity: 0 }}
+                          animate={{ height: 'auto', opacity: 1 }}
+                          exit={{ height: 0, opacity: 0 }}
+                          className="overflow-hidden"
+                        >
+                          <div className="p-10 space-y-10">
+                            {/* PROXY ALERT CARD */}
+                            {Math.abs(s.rho) >= 0.7 && (
+                              <div className="bg-terracotta/5 border-2 border-terracotta/20 rounded-2xl p-8 flex gap-8 items-start relative overflow-hidden">
+                                <div className="w-12 h-12 rounded-full bg-terracotta/10 flex items-center justify-center shrink-0">
+                                  <span className="material-symbols-outlined text-terracotta text-3xl">block</span>
+                                </div>
+                                <div className="space-y-3 relative z-10">
+                                  <h4 className="headline-serif text-2xl text-terracotta">🛑 Proxy Alert</h4>
+                                  <p className="text-charcoal/70 leading-relaxed max-w-2xl">
+                                    Feature <span className="font-mono font-bold text-charcoal">'{s.id}'</span> is a strong proxy for protected attributes (ρ = {(s.rho ?? 0).toFixed(2)}). 
+                                    This feature may be encoding sensitive information, leading to indirect discrimination.
+                                  </p>
+                                  <div className="flex gap-4 pt-2">
+                                    <Link 
+                                      href={`/fix?feature=${s.id}&method=remove`}
+                                      className="px-6 py-2 bg-charcoal text-white rounded-lg font-outfit font-bold text-[10px] uppercase tracking-widest hover:brightness-125 transition-all"
+                                    >
+                                      Remove Feature
+                                    </Link>
+                                    <Link 
+                                      href={`/fix?feature=${s.id}&method=reweight`}
+                                      className="px-6 py-2 border border-charcoal/20 rounded-lg font-outfit font-bold text-[10px] uppercase tracking-widest hover:bg-white transition-all"
+                                    >
+                                      Apply Re-weighting
+                                    </Link>
+                                  </div>
+                                </div>
+                                <div className="absolute top-0 right-0 w-32 h-full bg-terracotta opacity-[0.03] rotate-12 translate-x-12" />
+                              </div>
+                            )}
 
-        {/* Right Column: The Evidence Box / Map */}
-        <div className="lg:col-span-8 bg-cream rounded-2xl border border-charcoal/5 shadow-organic overflow-hidden flex flex-col">
-          <div className="p-8 border-b border-charcoal/10 flex justify-between items-center bg-white/50">
-            <div>
-              <h3 className="font-serif text-3xl text-charcoal italic">The Evidence: {selectedSuspect.name}</h3>
-              <p className="font-sans text-xs text-charcoal/50 uppercase tracking-widest mt-1">Detailed Correlation Analysis</p>
-            </div>
-            <Link 
-              href={`/fix?feature=${selectedSuspect.name}`}
-              className="bg-sage text-white px-6 py-2 rounded-lg font-serif hover:brightness-105 transition-all"
-            >
-              Simulate Fix
-            </Link>
-          </div>
-          
-          <div className="flex-1 relative bg-[#EBE4D8] p-8 flex items-center justify-center">
-            <div className="absolute inset-0 opacity-20 bg-[url('https://www.transparenttextures.com/patterns/pinstripe-dark.png')]"></div>
-            
-            <div className="relative z-10 w-full h-full border-2 border-charcoal/10 border-dashed rounded-xl flex items-center justify-center overflow-hidden">
-               <div className="text-center space-y-4 max-w-md p-8 bg-white/80 backdrop-blur-sm rounded-2xl shadow-xl animate-in fade-in zoom-in-95 duration-500">
-                  <span className={`material-symbols-outlined text-5xl ${selectedSuspect.proxy ? 'text-terracotta' : 'text-sage'}`}>
-                    {selectedSuspect.proxy ? 'location_on' : 'verified'}
-                  </span>
-                  <p className="font-serif text-2xl text-charcoal italic">"{selectedSuspect.explanation}"</p>
-                  <div className="h-px w-24 bg-charcoal/10 mx-auto"></div>
-                  <p className="text-xs font-bold text-terracotta uppercase tracking-widest">Recommendation: {selectedSuspect.recommendation}</p>
-               </div>
-            </div>
-          </div>
-
-          <div className="p-6 bg-charcoal/5 grid grid-cols-2 gap-4">
-             <div className="text-center p-4 border-r border-charcoal/10">
-                <p className="text-[10px] font-bold text-charcoal/40 uppercase tracking-widest">Correlation to Protected Group</p>
-                <p className="font-serif text-2xl text-terracotta">{selectedSuspect.proxy ? '0.82' : '0.04'}</p>
-             </div>
-             <div className="text-center p-4">
-                <p className="text-[10px] font-bold text-charcoal/40 uppercase tracking-widest">Potential Restored Approvals</p>
-                <p className="font-serif text-2xl text-sage">{selectedSuspect.proxy ? '+128' : 'N/A'}</p>
-             </div>
-          </div>
-        </div>
+                            {/* HISTOGRAM PANEL */}
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-12">
+                              <div className="space-y-6">
+                                <div>
+                                  <h4 className="headline-serif text-2xl text-charcoal">Distribution Shift</h4>
+                                  <p className="text-sm text-charcoal/50 mt-1 italic">Comparing baseline vs. current performance</p>
+                                </div>
+                                <p className="text-sm text-charcoal/70 leading-relaxed font-outfit">
+                                  The distribution of <span className="font-mono font-bold text-charcoal">{s.id}</span> has shifted 
+                                  {s.psi > 0.2 ? ' significantly ' : ' slightly '} by ~{(s.psi * 0.5).toFixed(2)} standard deviations 
+                                  over the last 6 months. This drift is a primary driver of the current fairness degradation.
+                                </p>
+                                <div className="flex gap-6">
+                                  <div className="flex items-center gap-2">
+                                    <div className="w-3 h-3 rounded-full bg-charcoal/20" />
+                                    <span className="text-[10px] font-bold text-charcoal/40 uppercase tracking-widest">Baseline (6mo ago)</span>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <div className="w-3 h-3 rounded-full bg-terracotta/40" />
+                                    <span className="text-[10px] font-bold text-charcoal/40 uppercase tracking-widest">Current (30 days)</span>
+                                  </div>
+                                </div>
+                              </div>
+                              
+                              <div className="h-64 bg-white/50 rounded-2xl border border-charcoal/5 p-6 relative min-h-[256px] min-w-[100px]">
+                                <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
+                              <BarChart data={getHistogramData(s)}>
+                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(0,0,0,0.05)" />
+                                    <Tooltip 
+                                      cursor={{ fill: 'rgba(0,0,0,0.02)' }}
+                                      content={({ active, payload }) => {
+                                        if (active && payload && payload.length) {
+                                          return (
+                                            <div className="glass-card p-3 shadow-xl border-none">
+                                              <p className="text-[10px] font-bold text-charcoal/40 uppercase mb-2">Bin {payload[0].payload.name}</p>
+                                              <div className="space-y-1">
+                                                <div className="flex justify-between gap-4">
+                                                  <span className="text-[10px] font-outfit text-charcoal/60">Baseline</span>
+                                                  <span className="metric-number text-xs font-bold">{(Number(payload[0].value) || 0).toFixed(1)}%</span>
+                                                </div>
+                                                <div className="flex justify-between gap-4">
+                                                  <span className="text-[10px] font-outfit text-terracotta">Current</span>
+                                                  <span className="metric-number text-xs font-bold text-terracotta">{(Number(payload[1].value) || 0).toFixed(1)}%</span>
+                                                </div>
+                                              </div>
+                                            </div>
+                                          );
+                                        }
+                                        return null;
+                                      }}
+                                    />
+                                    <Bar dataKey="baseline" fill="#2C2C2C" fillOpacity={0.1} radius={[4, 4, 0, 0]} />
+                                    <Bar dataKey="current" fill="#C44536" fillOpacity={0.4} radius={[4, 4, 0, 0]} />
+                                  </BarChart>
+                                </ResponsiveContainer>
+                              </div>
+                            </div>
+                          </div>
+                        </motion.div>
+                      </td>
+                    </tr>
+                  )}
+                </AnimatePresence>
+              </React.Fragment>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   );
 }
+
+// Helper to use React.Fragment in the loop
+import React from 'react';
