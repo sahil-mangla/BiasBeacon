@@ -12,7 +12,7 @@ export default function FooterTicker() {
       {/* Left: Ticker Label */}
       <div className="flex items-center gap-3 bg-cream z-10 pr-4">
         <span className="material-symbols-outlined text-sage">campaign</span>
-        <span className="font-sans font-bold text-[10px] tracking-widest text-charcoal uppercase whitespace-nowrap">Recent Wins</span>
+        <span className="font-sans font-bold text-[10px] tracking-widest text-charcoal uppercase whitespace-nowrap">FixIt.exe</span>
         <div className="h-4 w-px bg-charcoal/20"></div>
       </div>
 
