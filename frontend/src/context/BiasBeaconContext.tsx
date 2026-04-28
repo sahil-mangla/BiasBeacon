@@ -144,28 +144,54 @@ export function BiasBeaconProvider({ children }: { children: ReactNode }) {
   // On mount: check localStorage for existing session
   useEffect(() => {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return;
+    
+    async function loadDemo() {
+      try {
+        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || ''}/api/demo-data`);
+        if (res.ok) {
+          const demoData = await res.json();
+          dispatch({ type: 'SET_DEMO', payload: demoData });
+        }
+      } catch (err) {
+        console.error("Failed to load demo data", err);
+      }
+    }
+
+    if (!raw) {
+      loadDemo();
+      return;
+    }
+
     try {
       const stored = JSON.parse(raw);
       const ageHours = (Date.now() - stored.created_at) / 3600000;
       if (ageHours >= SESSION_TTL_HOURS) {
         localStorage.removeItem(STORAGE_KEY);
+        loadDemo();
         return;
       }
       // Validate session is still alive on the backend
       const sessionId = stored.session?.session_id;
-      if (!sessionId) return;
-      fetch(`/api/session/${sessionId}`)
+      if (!sessionId) {
+        loadDemo();
+        return;
+      }
+      fetch(`${process.env.NEXT_PUBLIC_API_URL || ''}/api/session/${sessionId}`)
         .then(r => {
           if (r.ok) {
             dispatch({ type: 'RESTORE_SESSION', payload: stored.appState });
           } else {
             localStorage.removeItem(STORAGE_KEY);
+            loadDemo();
           }
         })
-        .catch(() => localStorage.removeItem(STORAGE_KEY));
+        .catch(() => {
+          localStorage.removeItem(STORAGE_KEY);
+          loadDemo();
+        });
     } catch {
       localStorage.removeItem(STORAGE_KEY);
+      loadDemo();
     }
   }, []);
 

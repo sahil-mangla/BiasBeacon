@@ -2,11 +2,9 @@
 
 export default function FooterTicker() {
   const wins = [
-    "Bias in 'Years of Experience' mitigated 2 hours ago",
-    "Language localized for 4 underserved regions in Brazil",
-    "Accessibility score reached 98% for screen readers",
-    "Equity threshold met in Mid-Market Hiring Sector",
-    "New methodology approved by Global Ethics Charter"
+    "Real-time monitoring of Disparate Impact & Equalized Odds metrics",
+    "Predictive forecasting of fairness violations using ARIMA/Holt-Winters",
+    "Counterfactual loss estimation & surgical unbiasing interventions"
   ];
 
   return (
@@ -38,8 +36,7 @@ export default function FooterTicker() {
       {/* Right: Links */}
       <div className="flex items-center gap-6 bg-cream z-10 pl-4">
         <a className="font-serif text-xs tracking-wide text-charcoal/50 hover:text-charcoal transition-all" href="#">Methodology</a>
-        <a className="font-serif text-xs tracking-wide text-charcoal hover:text-sage transition-all font-medium underline" href="#">Ethics Charter</a>
-        <span className="font-serif text-[10px] text-charcoal/40 ml-4">© 2024 Bias Beacon</span>
+        <span className="font-serif text-[10px] text-charcoal/40 ml-4">© 2026 Bias Beacon</span>
       </div>
 
       <style jsx>{`

@@ -38,7 +38,7 @@ export default function Sidebar() {
             </div>
             <div>
               <h1 className="text-2xl font-bold headline-serif text-charcoal">BiasBeacon</h1>
-              <p className="text-[9px] font-bold text-charcoal/30 uppercase tracking-[0.2em] -mt-1">Algorithmic Equity</p>
+              <p className="text-[9px] font-bold text-charcoal/30 uppercase tracking-[0.2em] -mt-1">Bias is a bug, We fix it.</p>
             </div>
           </div>
         </div>
