@@ -3,7 +3,7 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   output: 'standalone',
   async rewrites() {
-    const backendUrl = process.env.BACKEND_URL || 'http://localhost:8080';
+    const backendUrl = 'https://backend-436542799320.us-central1.run.app';
     console.log(`[NextConfig] Using BACKEND_URL: ${backendUrl}`);
     return [
       {
