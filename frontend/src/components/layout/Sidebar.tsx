@@ -50,6 +50,7 @@ export default function Sidebar() {
               <Link 
                 key={item.href}
                 href={item.href} 
+                prefetch={false}
                 className={`flex items-center gap-4 px-5 py-4 transition-all duration-300 rounded-2xl group ${isActive ? 'bg-charcoal text-white shadow-xl' : 'text-charcoal/50 hover:text-charcoal hover:bg-charcoal/5'}`}
               >
                 <span className={`material-symbols-outlined text-xl transition-transform ${isActive ? 'scale-110' : 'group-hover:scale-110'}`}>{item.icon}</span>

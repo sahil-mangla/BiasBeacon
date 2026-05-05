@@ -19,7 +19,7 @@ cache = {
 
 def initialize_data():
     print("🚀 Initializing synthetic data and caching results...")
-    df, reference_group = generate_synthetic_loan_data(weeks=26, samples_per_week=500, seed=42)
+    df, reference_group = generate_synthetic_loan_data(weeks=20, samples_per_week=400, seed=42)
     
     # 1. Fairness Metrics
     fm = FairnessMetrics(df, target_col='approved', protected_col='group', 
